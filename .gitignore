@@ -1,4 +1,3 @@
-
 __pycache__/
 *.pyc
 .env
@@ -6,4 +5,4 @@ __pycache__/
 venv/
 node_modules/
 .DS_Store
-chroma_db/
+# chroma_db/  <-- Un-ignored for Demo Deployment
