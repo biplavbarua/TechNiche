@@ -20,7 +20,15 @@ if not GOOGLE_API_KEY:
     logger.error("GOOGLE_API_KEY not found. Please check .env file.")
     sys.exit(1)
 
-genai.configure(api_key=GOOGLE_API_KEY)
+# Ensure robust path for ChromaDB
+# If running in Docker, it maps to /app/chroma_db. 
+# If running locally from backend/, it maps to ./chroma_db
+CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
+if not os.path.exists(CHROMA_DB_PATH):
+    os.makedirs(CHROMA_DB_PATH)
+
+chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+collection = chroma_client.get_or_create_collection(name="legal_cases")
 
 def get_embedding(text: str):
     """Generates embedding using Gemini."""
@@ -40,9 +48,7 @@ def get_embedding(text: str):
 def ingest_data():
     """Reads cases.csv, scrapes text, embeds, and stores in ChromaDB."""
     
-    # Initialize Chroma (Persistent)
-    chroma_client = chromadb.PersistentClient(path="./chroma_db")
-    collection = chroma_client.get_or_create_collection(name="legal_cases")
+    # Collection is now global
     
     csv_path = "../legacy/cases.csv" # Relative to backend/ directory assuming run from backend/
     

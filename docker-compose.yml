@@ -2,10 +2,23 @@ version: '3.8'
 
 services:
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
     volumes:
+      # Persist the ChromaDB database
+      - ./backend/chroma_db:/app/chroma_db
+      # Mount code for hot-reloading during dev
       - ./backend/app:/app/app
+    restart: always
+
+# Frontend is managed by Vercel for this project structure, 
+# but if you wanted to run it locally with docker:
+#  frontend:
+#    build: ./frontend
+#    ports:
+#      - "3000:3000"
