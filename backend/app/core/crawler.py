@@ -6,7 +6,7 @@ from app.core.scraper import fetch_case_text
 
 logger = logging.getLogger(__name__)
 
-def crawl_and_ingest(start_url: str, limit: int = 5):
+def crawl_and_ingest(start_url: str, limit: int = 20):
     """
     Crawls a search result page, extracts case links, and returns their content.
     For this demo, we will simulate finding links because scraping search result pages 
