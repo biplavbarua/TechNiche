@@ -5,14 +5,17 @@ import { analyzeIdea, AnalysisResult } from "../lib/api";
 import { ArrowRight, Scale, AlertTriangle, Search, FileText } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { LearningModal } from "@/components/learning-modal";
 
 export default function Home() {
   const [idea, setIdea] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isLearningModalOpen, setIsLearningModalOpen] = useState(false);
 
   const handleAnalyze = async () => {
+    // ... existing analyze logic ...
     if (!idea.trim()) return;
     setLoading(true);
     setError(null);
@@ -33,6 +36,8 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-200 transition-colors duration-300 font-sans">
+      <LearningModal isOpen={isLearningModalOpen} onClose={() => setIsLearningModalOpen(false)} />
+
       <header className="fixed top-0 w-full z-50 border-b border-indigo-500/10 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md transition-colors duration-300">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -41,8 +46,13 @@ export default function Home() {
               LegalAI
             </span>
           </div>
-          <nav className="flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-400">
-            <a href="#" className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">Features</a>
+          <nav className="flex items-center gap-4 text-sm font-medium text-slate-600 dark:text-slate-400">
+            <button
+              onClick={() => setIsLearningModalOpen(true)}
+              className="hidden md:flex items-center gap-2 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+            >
+              Teach AI
+            </button>
             <ThemeToggle />
           </nav>
         </div>

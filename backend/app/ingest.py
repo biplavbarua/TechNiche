@@ -45,10 +45,68 @@ def get_embedding(text: str):
         logger.error(f"Error generating embedding: {e}")
         return None
 
+
+def process_and_store_document(text: str, metadata: dict, doc_id: str = None):
+    """
+    Processes a single document: chunks, embeds, and stores in ChromaDB.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Chunking (Naive - first 9000 chars for demo safety)
+        # Real implementations need smart chunking logic (RecursiveCharacterTextSplitter)
+        chunk = text[:9000] 
+        
+        # Embed
+        embedding = get_embedding(chunk)
+        
+        if not embedding:
+            logger.error("Failed to generate embedding.")
+            return False
+
+        # Generate ID if not provided
+        if not doc_id:
+            doc_id = f"doc_{int(time.time())}_{abs(hash(chunk))}"
+
+        collection.add(
+            documents=[chunk],
+            metadatas=[metadata],
+            ids=[doc_id],
+            embeddings=[embedding]
+        )
+        logger.info(f"Successfully stored document: {metadata.get('title', 'Untitled')}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error processing document: {e}")
+        return False
+
+def ingest_case_from_url(url: str, title: str = None) -> bool:
+    """
+    Fetches content from a URL and ingests it into the knowledge base.
+    """
+    logger.info(f"Ingesting from URL: {url}")
+    
+    text_content = fetch_case_text(url)
+    if not text_content:
+        logger.warning(f"Failed to fetch content for {url}")
+        return False
+    
+    # If title is not provided, try to extract or use a default
+    if not title:
+        # Simple heuristic: first line or slice
+        title = text_content.split('\n')[0][:100] if text_content else "Untitled Legal Case"
+        
+    metadata = {
+        "title": title,
+        "url": url,
+        "source": "autonomous_learning",
+        "ingested_at": str(time.time())
+    }
+    
+    return process_and_store_document(text_content, metadata)
+
 def ingest_data():
     """Reads cases.csv, scrapes text, embeds, and stores in ChromaDB."""
-    
-    # Collection is now global
     
     csv_path = "../legacy/cases.csv" # Relative to backend/ directory assuming run from backend/
     
@@ -69,7 +127,8 @@ def ingest_data():
             url = row['case_url']
             title = row['case_title']
             
-            # Check if likely already exists (naive check)
+            # Check if likely already exists (naive check by ID)
+            # In a real app, we might check by URL in metadata
             existing = collection.get(ids=[str(idx)])
             if existing['ids']:
                 logger.info(f"Skipping {title} (Already indexed)")
@@ -83,26 +142,20 @@ def ingest_data():
             if not text_content:
                 logger.warning(f"Failed to fetch content for {url}")
                 continue
-                
-            # Chunking (Naive - first 8000 chars for demo, real implementations need smart chunking)
-            # Gemini has input limits for embeddings, usually 2048 or something.
-            # let's take a safe chunk.
-            chunk = text_content[:9000] 
             
-            # Embed
-            embedding = get_embedding(chunk)
+            metadata = {
+                "title": title, 
+                "url": url, 
+                "author": row.get('case_author', '')
+            }
+            
+            # Use the new shared function
+            # We enforce the ID to match the CSV index for backward compatibility/idempotency
+            success = process_and_store_document(text_content, metadata, doc_id=str(idx))
             
             # Rate limiting for Free Tier
-            time.sleep(4)
-            
-            if embedding:
-                collection.add(
-                    documents=[chunk],
-                    metadatas=[{"title": title, "url": url, "author": row.get('case_author', '')}],
-                    ids=[str(idx)],
-                    embeddings=[embedding]
-                )
-                logger.info(f"Indexed: {title}")
+            if success:
+                time.sleep(4)
             
             idx += 1
             
