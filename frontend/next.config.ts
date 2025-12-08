@@ -5,23 +5,36 @@ const nextConfig: NextConfig = {
     const rawUrl = process.env.NEXT_PUBLIC_API_URL;
     let apiUrl = rawUrl || "http://127.0.0.1:8000";
 
-    // Sanitize: Remove quotes and whitespace
+    // Aggressive Sanitization:
+    // 1. Remove quotes and standard whitespace which might come from copy-pasting env vars
     apiUrl = apiUrl.replace(/['"\s]/g, "");
 
-    // Ensure no trailing slash
-    if (apiUrl.endsWith("/")) {
-      apiUrl = apiUrl.slice(0, -1);
+    // 2. Ensure it starts with http/https.
+    try {
+      // If it doesn't start with http, assume https if it looks like a domain, otherwise default
+      if (!apiUrl.startsWith("http")) {
+        if (apiUrl.includes(".")) {
+          apiUrl = "https://" + apiUrl;
+        } else {
+          // Fallback if totally garbage
+          console.warn("Invalid API URL detected, falling back to localhost");
+          apiUrl = "http://127.0.0.1:8000";
+        }
+      }
+      // Validate URL structure
+      const urlObj = new URL(apiUrl);
+      apiUrl = urlObj.origin; // This gives us a clean http://domain.com without trailing slash
+    } catch (e) {
+      console.warn("Failed to parse API URL, falling back to localhost:", e);
+      apiUrl = "http://127.0.0.1:8000";
     }
 
-    console.log("Rewrite destination:", apiUrl); // Helpful for Vercel logs
+    console.log("Rewriting /api to:", apiUrl);
 
     return [
       {
         source: "/api/:path*",
-        destination:
-          process.env.NODE_ENV === "development"
-            ? "http://127.0.0.1:8000/api/:path*"
-            : `${apiUrl}/api/:path*`,
+        destination: `${apiUrl}/api/:path*`,
       },
     ];
   },
