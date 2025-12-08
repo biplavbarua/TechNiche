@@ -73,7 +73,8 @@ def process_and_store_document(text: str, metadata: dict, doc_id: str = None):
             ids=[doc_id],
             embeddings=[embedding]
         )
-        logger.info(f"Successfully stored document: {metadata.get('title', 'Untitled')}")
+        source = metadata.get('url', 'Unknown Source')
+        logger.info(f"Successfully stored document: {metadata.get('title', 'Untitled')} from {source}")
         return True
 
     except Exception as e:

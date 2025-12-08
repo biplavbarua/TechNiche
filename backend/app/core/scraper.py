@@ -22,12 +22,17 @@ def fetch_case_text(url: str) -> str:
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # IndianKanoon specific extraction (usually in <div class="judgments"> or similar)
-        # Based on previous robust logic, the main content is often just the full text.
-        # We'll try to get the 'expanded_headline' or main doc content.
-        
-        # Fallback to getting all text if specific container not found
-        content = soup.get_text(separator='\n', strip=True)
+        # IndianKanoon specific extraction
+        # The main judgment text is often in a div with class "judgments" or "doc_content"
+        main_content = soup.find('div', class_='judgments')
+        if not main_content:
+             main_content = soup.find('div', class_='doc_content')
+             
+        if main_content:
+            content = main_content.get_text(separator='\n', strip=True)
+        else:
+            # Fallback to getting all text if specific container not found
+            content = soup.get_text(separator='\n', strip=True)
         
         # Basic cleaning (removing excessive newlines)
         cleaned_content = '\n'.join([line for line in content.split('\n') if line.strip()])
