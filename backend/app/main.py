@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from app.core.rag import query_legal_assistant
 from app.core.crawler import crawl_and_ingest
-from app.ingest import get_embedding, collection, ingest_case_from_url
+from app.ingest import collection, ingest_case_from_url
 import time
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import HttpUrl

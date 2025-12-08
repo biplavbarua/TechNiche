@@ -4,7 +4,7 @@ import sys
 import logging
 import chromadb
 import time
-import google.generativeai as genai
+
 from app.core.scraper import fetch_case_text
 from dotenv import load_dotenv
 
@@ -30,48 +30,25 @@ if not os.path.exists(CHROMA_DB_PATH):
 chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 collection = chroma_client.get_or_create_collection(name="legal_cases")
 
-def get_embedding(text: str):
-    """Generates embedding using Gemini."""
-    try:
-        # Gemini text-embedding-004 is current standard
-        result = genai.embed_content(
-            model="models/text-embedding-004",
-            content=text,
-            task_type="retrieval_document",
-            title="Legal Case"
-        )
-        return result['embedding']
-    except Exception as e:
-        logger.error(f"Error generating embedding: {e}")
-        return None
-
 
 def process_and_store_document(text: str, metadata: dict, doc_id: str = None):
     """
-    Processes a single document: chunks, embeds, and stores in ChromaDB.
-    Returns True if successful, False otherwise.
+    Processes a single document: chunks and stores in ChromaDB.
+    ChromaDB handles embedding automatically using default local model.
     """
     try:
         # Chunking (Naive - first 9000 chars for demo safety)
-        # Real implementations need smart chunking logic (RecursiveCharacterTextSplitter)
         chunk = text[:9000] 
         
-        # Embed
-        embedding = get_embedding(chunk)
-        
-        if not embedding:
-            logger.error("Failed to generate embedding.")
-            return False
-
         # Generate ID if not provided
         if not doc_id:
             doc_id = f"doc_{int(time.time())}_{abs(hash(chunk))}"
 
+        # Add to collection (Let Chroma embed it)
         collection.add(
             documents=[chunk],
             metadatas=[metadata],
-            ids=[doc_id],
-            embeddings=[embedding]
+            ids=[doc_id]
         )
         source = metadata.get('url', 'Unknown Source')
         logger.info(f"Successfully stored document: {metadata.get('title', 'Untitled')} from {source}")

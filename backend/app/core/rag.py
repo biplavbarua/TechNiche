@@ -1,60 +1,55 @@
 import os
-import google.generativeai as genai
+from openai import OpenAI
 import chromadb
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Initialize Gemini
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
+# Initialize OpenRouter Client
+# We use OpenRouter's API URL. The key is in env vars (OPENROUTER_API_KEY)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
 
 # Initialize ChromaDB (Persistent)
 # Robust path handling matching ingest.py
 CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "chroma_db")
 
 if not os.path.exists(CHROMA_DB_PATH):
-    # Fallback to local dir if structure implies it
-    CHROMA_DB_PATH = "chroma_db"
+    pass # Chroma will create it if needed interaction happens
 
 chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 collection = chroma_client.get_or_create_collection(name="legal_cases")
 
-def get_gemini_response(prompt: str) -> str:
-    if not GOOGLE_API_KEY:
-        return "Error: Gemini API Key not found."
+def get_llm_response(prompt: str) -> str:
+    if not OPENROUTER_API_KEY:
+        return "Error: OpenRouter API Key not found."
     
-    model = genai.GenerativeModel('models/gemini-2.0-flash')
-    response = model.generate_content(prompt)
-    return response.text
-
-def get_query_embedding(text: str):
     try:
-        result = genai.embed_content(
-            model="models/text-embedding-004",
-            content=text,
-            task_type="retrieval_query"
+        # Using Gemini 2.0 Flash via OpenRouter (it's free and fast)
+        response = client.chat.completions.create(
+            model="google/gemini-2.0-flash-exp:free", 
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
         )
-        return result['embedding']
+        return response.choices[0].message.content
     except Exception as e:
-        print(f"Embedding error: {e}")
-        return None
+        return f"Error from AI Provider: {str(e)}"
 
 def query_legal_assistant(user_query: str):
     """
     Real RAG Construction
     """
-    # 1. Embed Query
-    query_emb = get_query_embedding(user_query)
-    
     context_text = ""
     cited_cases = []
     
-    if query_emb:
-        # 2. Retrieve
+    # 1. Retrieve (Chroma handles embedding the query string automatically)
+    try:
         results = collection.query(
-            query_embeddings=[query_emb],
+            query_texts=[user_query],
             n_results=3
         )
         
@@ -62,14 +57,19 @@ def query_legal_assistant(user_query: str):
         if results['documents']:
             for i, doc in enumerate(results['documents'][0]):
                 meta = results['metadatas'][0][i]
-                context_text += f"\nCase: {meta['title']}\nContent: {doc[:1000]}...\n"
-                cited_cases.append(meta['title'])
+                title = meta.get('title', 'Unknown Case')
+                context_text += f"\nCase: {title}\nContent: {doc[:1000]}...\n"
+                cited_cases.append(title)
+                
+    except Exception as e:
+        print(f"Retrieval error: {e}")
+        # If DB is empty or issues, proceed with empty context
     
     # Fallback if no context
     if not context_text:
         context_text = "No specific case law found in database. Answering based on general knowledge."
     
-    # 3. Generate
+    # 2. Generate
     prompt = f"""
     You are an expert Legal AI Assistant for Indian Copyright Law.
     
@@ -86,7 +86,7 @@ def query_legal_assistant(user_query: str):
     3. Suggest specific modifications (Loopholes/Transformativeness) to reduce risk.
     """
     
-    analysis = get_gemini_response(prompt)
+    analysis = get_llm_response(prompt)
     
     return {
         "analysis": analysis,
