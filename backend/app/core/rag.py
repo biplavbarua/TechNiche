@@ -8,10 +8,20 @@ load_dotenv()
 # Initialize OpenRouter Client
 # We use OpenRouter's API URL. The key is in env vars (OPENROUTER_API_KEY)
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-)
+
+# Initialize client lazily or with dummy key to prevent immediate crash on import if env var is missing (like in CI)
+try:
+    if OPENROUTER_API_KEY:
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=OPENROUTER_API_KEY,
+        )
+    else:
+        # Placeholder for CI/CD import tests
+        client = None
+except Exception as e:
+    client = None
+    print(f"Warning: Failed to initialize OpenAI client: {e}")
 
 # Initialize ChromaDB (Persistent)
 # Robust path handling matching ingest.py
@@ -24,13 +34,13 @@ chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 collection = chroma_client.get_or_create_collection(name="legal_cases")
 
 def get_llm_response(prompt: str) -> str:
-    if not OPENROUTER_API_KEY:
-        return "Error: OpenRouter API Key not found."
+    if not client:
+        return "Error: OpenRouter API configuration missing (Key not found)."
     
     try:
-        # Using Gemini 2.0 Flash via OpenRouter (it's free and fast)
+        # Using Nvidia Nemotron via OpenRouter as requested
         response = client.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free", 
+            model="nvidia/nemotron-nano-12b-v2-vl:free", 
             messages=[
                 {"role": "user", "content": prompt}
             ]
