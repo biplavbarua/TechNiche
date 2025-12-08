@@ -17,8 +17,8 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 if not GOOGLE_API_KEY:
-    logger.error("GOOGLE_API_KEY not found. Please check .env file.")
-    sys.exit(1)
+    logger.warning("GOOGLE_API_KEY not found. Ingestion will fail if attempted.")
+    # sys.exit(1) # Removed to allow import in CI/CD without env vars
 
 # Ensure robust path for ChromaDB
 # If running in Docker, it maps to /app/chroma_db. 
