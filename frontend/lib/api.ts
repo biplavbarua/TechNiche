@@ -9,12 +9,10 @@ export interface CrawlResult {
 }
 
 const getBackendUrl = () => {
-    // Ensure no trailing slash
-    let url = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    if (url.endsWith("/")) {
-        url = url.slice(0, -1);
-    }
-    return url;
+    // Use relative path to leverage Next.js rewrites
+    // This allows the browser to call /api/... on the same domain,
+    // and Next.js will proxy it to the actual backend.
+    return "";
 };
 
 export async function analyzeIdea(idea: string): Promise<AnalysisResult> {
