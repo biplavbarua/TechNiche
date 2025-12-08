@@ -25,6 +25,13 @@ def crawl_and_ingest(start_url: str, limit: int = 5):
     found_cases = []
     
     try:
+        # Check if the start_url is already a likely case URL
+        if "/doc/" in start_url:
+             logger.info(f"URL {start_url} appears to be a specific document.")
+             # We might fetch the title from the page content in real scraping, 
+             # but here we'll just return it as a found case to be processed.
+             return [{"url": start_url, "title": "Direct Link Case"}]
+        
         # User-Agent helpful for not getting blocked
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(start_url, headers=headers)

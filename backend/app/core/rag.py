@@ -11,8 +11,14 @@ if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
 
 # Initialize ChromaDB (Persistent)
-# We assume the DB is created by ingest.py in the root or backend dir
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+# Robust path handling matching ingest.py
+CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "chroma_db")
+
+if not os.path.exists(CHROMA_DB_PATH):
+    # Fallback to local dir if structure implies it
+    CHROMA_DB_PATH = "chroma_db"
+
+chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 collection = chroma_client.get_or_create_collection(name="legal_cases")
 
 def get_gemini_response(prompt: str) -> str:
