@@ -1,6 +1,7 @@
 import os
 from openai import OpenAI
 import chromadb
+import traceback
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,8 +38,8 @@ def get_llm_response(prompt: str) -> str:
     if not client:
         return "Error: OpenRouter API configuration missing (Key not found)."
     
+    # Primary Model: Nvidia Nemotron
     try:
-        # Using Nvidia Nemotron via OpenRouter as requested
         response = client.chat.completions.create(
             model="nvidia/nemotron-nano-12b-v2-vl:free", 
             messages=[
@@ -47,21 +48,34 @@ def get_llm_response(prompt: str) -> str:
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"Error from AI Provider: {str(e)}"
+        print(f"Warning: Nvidia Nemotron failed ({e}). Switching to Fallback (Gemini Flash)...")
+        # Fallback Model: Gemini Flash 2.0 (Experimental/Free)
+        try:
+            response = client.chat.completions.create(
+                model="google/gemini-2.0-flash-exp:free",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            return response.choices[0].message.content
+        except Exception as fallback_error:
+             return f"Error from AI Provider (Primary & Fallback failed): {str(fallback_error)}"
 
 def query_legal_assistant(user_query: str):
     """
-    Real RAG Construction
+    Real RAG Construction - Hardened
     """
     context_text = ""
     cited_cases = []
     
     # 1. Retrieve (Chroma handles embedding the query string automatically)
+    print(f"DEBUG: Starting retrieval for query: {user_query}")
     try:
         results = collection.query(
             query_texts=[user_query],
             n_results=3
         )
+        print(f"DEBUG: Retrieval successful. Found {len(results['documents'][0])} docs.")
         
         # Parse results
         if results['documents']:
@@ -72,8 +86,10 @@ def query_legal_assistant(user_query: str):
                 cited_cases.append(title)
                 
     except Exception as e:
-        print(f"Retrieval error: {e}")
-        # If DB is empty or issues, proceed with empty context
+        print(f"CRITICAL RETRIEVAL ERROR: {e}")
+        traceback.print_exc()
+        # Fallback: Don't crash, just proceed without context
+        context_text = "Database retrieval temporarily unavailable. Proceeding with general legal knowledge."
     
     # Fallback if no context
     if not context_text:
