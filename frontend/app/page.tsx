@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { analyzeIdea, AnalysisResult } from "../lib/api";
 import ReactMarkdown from 'react-markdown';
+import { Typewriter } from "@/components/typewriter";
 import { ArrowRight, Scale, AlertTriangle, Search, FileText } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -149,7 +150,7 @@ export default function Home() {
                   {/* Decorative Header (Paper Like) */}
                   <div className="border-b-2 border-slate-100 dark:border-slate-800 pb-4 mb-8 flex justify-between items-end">
                     <div>
-                      <h2 className="text-2xl font-bold font-sans text-slate-900 dark:text-white uppercase tracking-wider">
+                      <h2 className="text-3xl font-bold font-serif text-slate-900 dark:text-white tracking-tight">
                         Legal Analysis
                       </h2>
                       <p className="text-xs text-slate-400 font-mono mt-1">REF: {new Date().toISOString().split('T')[0]}-{Math.floor(Math.random() * 1000)}</p>
@@ -157,21 +158,26 @@ export default function Home() {
                     <Search className="w-6 h-6 text-slate-300 dark:text-slate-600" />
                   </div>
 
-                  <div className="prose prose-slate dark:prose-invert max-w-none text-slate-700 dark:text-slate-300 font-serif">
-                    <ReactMarkdown
-                      components={{
-                        h1: ({ node, ...props }) => <h1 className="text-2xl font-bold font-sans mt-8 mb-4 border-l-4 border-indigo-500 pl-4" {...props} />,
-                        h2: ({ node, ...props }) => <h2 className="text-xl font-bold font-sans mt-6 mb-3 text-slate-800 dark:text-slate-100 uppercase tracking-wide" {...props} />,
-                        h3: ({ node, ...props }) => <h3 className="text-lg font-semibold font-sans mt-4 mb-2 text-indigo-600 dark:text-indigo-400" {...props} />,
-                        ul: ({ node, ...props }) => <ul className="list-disc pl-5 space-y-2 mb-6 text-slate-700 dark:text-slate-300" {...props} />,
-                        li: ({ node, ...props }) => <li className="pl-1" {...props} />,
-                        p: ({ node, ...props }) => <p className="mb-6 text-lg leading-loose" {...props} />,
-                        strong: ({ node, ...props }) => <strong className="font-bold text-slate-900 dark:text-white bg-yellow-50 dark:bg-yellow-900/20 px-1 rounded" {...props} />,
-                        blockquote: ({ node, ...props }) => <blockquote className="border-l-4 border-slate-300 dark:border-slate-700 pl-4 italic text-slate-500 my-6" {...props} />,
-                      }}
-                    >
-                      {result.analysis}
-                    </ReactMarkdown>
+                  <div className="prose prose-slate dark:prose-invert max-w-none text-slate-700 dark:text-slate-300 font-sans">
+                    {/* Render with Typewriter Effect */}
+                    <Typewriter text={result.analysis} speed={3}>
+                      {(displayText) => (
+                        <ReactMarkdown
+                          components={{
+                            h1: ({ node, ...props }) => <h1 className="text-2xl font-bold font-serif mt-8 mb-4 border-l-4 border-indigo-500 pl-4 text-slate-900 dark:text-white" {...props} />,
+                            h2: ({ node, ...props }) => <h2 className="text-xl font-bold font-serif mt-6 mb-3 text-slate-800 dark:text-slate-100" {...props} />,
+                            h3: ({ node, ...props }) => <h3 className="text-lg font-semibold font-serif mt-4 mb-2 text-indigo-600 dark:text-indigo-400" {...props} />,
+                            ul: ({ node, ...props }) => <ul className="list-disc pl-5 space-y-2 mb-6 text-slate-700 dark:text-slate-300" {...props} />,
+                            li: ({ node, ...props }) => <li className="pl-1" {...props} />,
+                            p: ({ node, ...props }) => <p className="mb-6 text-lg leading-loose font-sans" {...props} />,
+                            strong: ({ node, ...props }) => <strong className="font-semibold text-slate-900 dark:text-white bg-indigo-50 dark:bg-indigo-900/20 px-1 rounded" {...props} />,
+                            blockquote: ({ node, ...props }) => <blockquote className="border-l-4 border-slate-300 dark:border-slate-700 pl-4 italic text-slate-500 my-6 font-serif" {...props} />,
+                          }}
+                        >
+                          {displayText}
+                        </ReactMarkdown>
+                      )}
+                    </Typewriter>
                   </div>
 
                   {/* Decorative Footer */}
