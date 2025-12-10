@@ -22,10 +22,11 @@ function Stars(props: any) {
             <Points ref={ref} positions={sphere} stride={3} frustumCulled={false} {...props}>
                 <PointMaterial
                     transparent
-                    color="#6366f1"
-                    size={0.002}
+                    color="#818cf8"
+                    size={0.006}
                     sizeAttenuation={true}
                     depthWrite={false}
+                    opacity={0.8}
                 />
             </Points>
         </group>
