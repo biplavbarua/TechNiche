@@ -4,10 +4,11 @@ import { useState } from "react";
 import { analyzeIdea, AnalysisResult } from "../lib/api";
 import ReactMarkdown from 'react-markdown';
 import { Typewriter } from "@/components/typewriter";
-import { ArrowRight, Scale, AlertTriangle, Search, FileText } from "lucide-react";
+import { ArrowRight, Scale, AlertTriangle, Search, FileText, Github, Linkedin, BookOpen } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { LearningModal } from "@/components/learning-modal";
+import { Background3D } from "@/components/background-3d";
 
 export default function Home() {
   const [idea, setIdea] = useState("");
@@ -17,15 +18,14 @@ export default function Home() {
   const [isLearningModalOpen, setIsLearningModalOpen] = useState(false);
 
   const handleAnalyze = async () => {
-    // ... existing analyze logic ...
     if (!idea.trim()) return;
     setLoading(true);
     setError(null);
+    setResult(null);
     try {
       const data = await analyzeIdea(idea);
       setResult(data);
     } catch (err: any) {
-      // Enhanced Error Message for "Failed to fetch"
       if (err.message && err.message.includes("fetch")) {
         setError("Failed to connect to the Server. Please checking your internet connection or try again later. If you are the developer, ensure the Backend URL is set correctly.");
       } else {
@@ -37,18 +37,38 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-200 transition-colors duration-300 font-sans">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-200 transition-colors duration-300 font-sans relative overflow-hidden">
+      <Background3D />
       <LearningModal isOpen={isLearningModalOpen} onClose={() => setIsLearningModalOpen(false)} />
 
       <header className="fixed top-0 w-full z-50 border-b border-indigo-500/10 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md transition-colors duration-300">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Scale className="w-6 h-6 text-indigo-600 dark:text-indigo-500" />
-            <span className="text-xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 dark:from-indigo-400 dark:to-purple-400 bg-clip-text text-transparent">
+            <span className="text-xl font-bold font-serif bg-gradient-to-r from-indigo-600 to-purple-600 dark:from-indigo-400 dark:to-purple-400 bg-clip-text text-transparent">
               LegalAI
             </span>
           </div>
           <nav className="flex items-center gap-4 text-sm font-medium text-slate-600 dark:text-slate-400">
+            <a
+              href="https://github.com/biplavbarua/TechNiche"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+              title="View Source on GitHub"
+            >
+              <Github className="w-5 h-5" />
+            </a>
+            <a
+              href="https://linkedin.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+              title="Connect on LinkedIn"
+            >
+              <Linkedin className="w-5 h-5" />
+            </a>
+            <div className="h-4 w-[1px] bg-slate-200 dark:bg-slate-800 mx-1" />
             <button
               onClick={() => setIsLearningModalOpen(true)}
               className="hidden md:flex items-center gap-2 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
@@ -60,7 +80,7 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="pt-32 pb-20 px-6 max-w-5xl mx-auto">
+      <main className="pt-32 pb-20 px-6 max-w-5xl mx-auto z-10 relative">
         <div className="text-center mb-16 space-y-4">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -74,7 +94,7 @@ export default function Home() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 }}
-            className="text-5xl md:text-6xl font-extrabold tracking-tight text-slate-900 dark:text-white mb-6"
+            className="text-5xl md:text-6xl font-extrabold tracking-tight text-slate-900 dark:text-white mb-6 font-serif"
           >
             Navigate Copyright <br />
             <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 to-purple-600 dark:from-indigo-400 dark:to-purple-600">
@@ -95,14 +115,14 @@ export default function Home() {
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 0.3 }}
-          className="bg-white/50 dark:bg-slate-900/50 border border-slate-200 dark:border-indigo-500/20 rounded-2xl p-2 shadow-xl dark:shadow-2xl backdrop-blur-sm transition-colors duration-300"
+          className="bg-white/70 dark:bg-slate-900/70 border border-slate-200 dark:border-indigo-500/20 rounded-2xl p-2 shadow-xl dark:shadow-2xl backdrop-blur-md transition-colors duration-300"
         >
           <div className="relative">
             <textarea
               value={idea}
               onChange={(e) => setIdea(e.target.value)}
               placeholder="E.g., I want to make a dark comedy parody of a popular superhero movie..."
-              className="w-full h-40 bg-slate-50 dark:bg-slate-950/50 rounded-xl p-6 text-lg text-slate-900 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none transition-all"
+              className="w-full h-40 bg-slate-50/50 dark:bg-slate-950/50 rounded-xl p-6 text-lg text-slate-900 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none transition-all"
             />
             <div className="absolute bottom-4 right-4">
               <button
@@ -131,7 +151,7 @@ export default function Home() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0 }}
-              className="mt-6 p-4 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 text-red-700 dark:text-red-200 flex items-center gap-3"
+              className="mt-6 p-4 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 text-red-700 dark:text-red-200 flex items-center gap-3 backdrop-blur-md"
             >
               <AlertTriangle className="w-5 h-5 flex-shrink-0" />
               {error}
@@ -191,7 +211,7 @@ export default function Home() {
 
               {/* Citations Column */}
               <div className="space-y-6">
-                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-xl transition-colors duration-300">
+                <div className="bg-white/80 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-xl backdrop-blur-md transition-colors duration-300">
                   <h3 className="text-lg font-semibold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
                     <FileText className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
                     Cited Cases
@@ -206,7 +226,7 @@ export default function Home() {
                   </ul>
                 </div>
 
-                <div className="bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 rounded-xl p-6 transition-colors duration-300">
+                <div className="bg-slate-50/50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 rounded-xl p-6 transition-colors duration-300 backdrop-blur-sm">
                   <h3 className="text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Disclaimer</h3>
                   <p className="text-xs text-slate-500 leading-relaxed">
                     This tool provides information for educational purposes only and does not constitute legal advice. Always consult with a qualified attorney for specific legal concerns.
@@ -218,7 +238,7 @@ export default function Home() {
         </AnimatePresence>
       </main>
 
-      <footer className="py-8 border-t border-slate-200 dark:border-slate-800 text-center text-slate-500 dark:text-slate-600 text-sm transition-colors duration-300">
+      <footer className="py-8 border-t border-slate-200 dark:border-slate-800 text-center text-slate-500 dark:text-slate-600 text-sm transition-colors duration-300 z-10 relative bg-white/50 dark:bg-slate-950/50 backdrop-blur-md">
         <p>&copy; {new Date().getFullYear()} TechNiche Legal AI. All rights reserved.</p>
       </footer>
     </div>
