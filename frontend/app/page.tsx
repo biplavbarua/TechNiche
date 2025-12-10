@@ -11,7 +11,6 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { LearningModal } from "@/components/learning-modal";
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
-import { Background3D } from "@/components/background-3d";
 
 export default function Home() {
   const [idea, setIdea] = useState("");
@@ -62,7 +61,6 @@ export default function Home() {
 
   return (
     <div className="min-h-screen text-slate-900 dark:text-slate-200 transition-colors duration-300 font-sans relative overflow-hidden">
-      <Background3D />
       <LearningModal isOpen={isLearningModalOpen} onClose={() => setIsLearningModalOpen(false)} />
 
       <header className="fixed top-0 w-full z-50 border-b border-indigo-500/10 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md transition-colors duration-300">
