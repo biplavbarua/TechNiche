@@ -24,15 +24,17 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install pytest httpx
+        pip install pytest pytest-asyncio httpx
         
     - name: Run Backend Tests
       env:
         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+        PINECONE_ENVIRONMENT: ${{ secrets.PINECONE_ENVIRONMENT }}
+        PINECONE_INDEX: ${{ secrets.PINECONE_INDEX }}
       run: |
-        # Create a dummy test file if not exists or run pytest
-        # For now, we will test import and basic health check
-        python -c "from app.main import app; print('App imports successfully')"
+        # Run the full test suite
+        pytest tests -v
         
   frontend-build:
     runs-on: ubuntu-latest
