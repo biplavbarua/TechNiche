@@ -1,8 +1,9 @@
 fastapi
 uvicorn
-chromadb
+pinecone
 openai
 pydantic
 python-dotenv
 requests
 beautifulsoup4
+google-generativeai

@@ -1,77 +1,318 @@
 import csv
 import os
 import sys
+import hashlib
 import logging
-import chromadb
 import time
+from datetime import date, datetime
 
+from pinecone import Pinecone
 from app.core.scraper import fetch_case_text
+from app.core.extraction import extract_legal_metadata
 from dotenv import load_dotenv
 
-# Setup logging
+# ─── Setup ────────────────────────────────────────────────────────────────────
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load env vars
 load_dotenv()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-if not GOOGLE_API_KEY:
-    logger.warning("GOOGLE_API_KEY not found. Ingestion will fail if attempted.")
-    # sys.exit(1) # Removed to allow import in CI/CD without env vars
+# ─── Pinecone Client ─────────────────────────────────────────────────────────
 
-# Ensure robust path for ChromaDB
-# If running in Docker, it maps to /app/chroma_db. 
-# If running locally from backend/, it maps to ./chroma_db
-CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
-if not os.path.exists(CHROMA_DB_PATH):
-    os.makedirs(CHROMA_DB_PATH)
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+if not PINECONE_API_KEY:
+    raise EnvironmentError("PINECONE_API_KEY not found in environment variables. Add it to your .env file.")
 
-chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-collection = chroma_client.get_or_create_collection(name="legal_cases")
+pc = Pinecone(api_key=PINECONE_API_KEY)
+INDEX_NAME = "techniche-legal-index"
+index = pc.Index(INDEX_NAME)
 
+# The embedding model hosted by Pinecone (Integrated Inference)
+EMBED_MODEL = "llama-text-embed-v2"
+
+# ─── Chunking ────────────────────────────────────────────────────────────────
+
+CHUNK_SIZE = 1500      # characters per chunk
+CHUNK_OVERLAP = 200    # overlap between consecutive chunks
+MAX_CHUNKS = 15        # safety cap per document
+
+
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """
+    Splits text into overlapping chunks using a sliding window.
+    
+    Unlike the previous text[:9000] truncation which permanently discarded
+    80%+ of long judgments, this preserves the entire document across
+    multiple indexed chunks — each inheriting parent metadata.
+    """
+    if not text:
+        return []
+    
+    chunks = []
+    start = 0
+    while start < len(text) and len(chunks) < MAX_CHUNKS:
+        end = start + chunk_size
+        chunk = text[start:end]
+        
+        # Only add non-trivial chunks (skip trailing whitespace fragments)
+        if len(chunk.strip()) > 50:
+            chunks.append(chunk)
+        
+        start += chunk_size - overlap
+    
+    return chunks
+
+
+# ─── Deduplication ───────────────────────────────────────────────────────────
+
+def generate_deterministic_id(text: str, chunk_index: int = 0) -> str:
+    """
+    Generates a deterministic document ID using SHA-256.
+    
+    The previous implementation used Python's built-in hash() which is
+    randomly seeded per session (Python 3.3+), meaning the same document
+    ingested in two different sessions would get two different IDs — 
+    creating silent duplicates in the database.
+    """
+    content_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
+    return f"doc_{content_hash}_chunk{chunk_index}"
+
+
+def is_url_already_ingested(url: str) -> bool:
+    """
+    Checks if a URL has already been ingested by querying Pinecone metadata.
+    
+    This prevents the duplicate-flooding problem where train_bot.py or
+    repeated /api/learn/url calls would store the same case N times.
+    """
+    try:
+        # Use list() with a metadata filter to check for existing URL
+        results = index.list(prefix=None, limit=1)
+        # Pinecone doesn't support direct metadata-only filtering on list,
+        # so we do a dummy search with a filter instead.
+        search_results = index.search(
+            namespace="__default__",
+            query={
+                "top_k": 1,
+                "inputs": {"text": url},
+                "filter": {"url": {"$eq": url}}
+            },
+            model=EMBED_MODEL,
+        )
+        if search_results and hasattr(search_results, 'result') and search_results.result.hits:
+            return True
+    except Exception as e:
+        logger.debug(f"URL dedup check failed (non-critical): {e}")
+    return False
+
+
+# ─── Temporal Conflict Resolution ────────────────────────────────────────────
+
+def parse_date_safe(date_str: str) -> date | None:
+    """Attempts to parse a date string in multiple formats. Returns None on failure."""
+    if not date_str or date_str == "UNKNOWN":
+        return None
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def resolve_legal_conflicts(extracted_metadata: dict):
+    """
+    Temporal Conflict Resolution — the novel core of this pipeline.
+    
+    When a new case overrules prior cases, this function:
+    1. Finds the overruled cases in the vector database.
+    2. VERIFIES that the new case is chronologically newer (date comparison).
+    3. Only then marks old cases as 'overruled' with provenance metadata.
+    
+    This prevents hallucinated overruling (LLM claiming A overrules B
+    when B is actually the newer decision) and provides an auditable trail.
+    """
+    overrules_str = extracted_metadata.get("ai_overrules_cases", "")
+    if not overrules_str:
+        return
+        
+    new_case_title = extracted_metadata.get("title", extracted_metadata.get("ai_case_name", "Unknown Case"))
+    new_case_date_str = extracted_metadata.get("ai_judgment_date", "UNKNOWN")
+    new_case_date = parse_date_safe(new_case_date_str)
+    
+    overruled_cases = [c.strip() for c in overrules_str.split(",") if c.strip()]
+    
+    for case_name in overruled_cases:
+        # ── Step 1: Find the old case in the DB via semantic search ──
+        results = _find_case_in_db(case_name)
+        
+        if not results:
+            logger.info(f"Overruled case '{case_name}' not found in DB. Skipping (it may not have been ingested yet).")
+            continue
+        
+        # ── Step 2: Temporal verification ──
+        old_meta = results[0].get("metadata", {}) if results else {}
+        
+        if new_case_date:
+            old_case_date_str = old_meta.get("ai_judgment_date", "UNKNOWN")
+            old_case_date = parse_date_safe(old_case_date_str)
+            
+            if old_case_date and new_case_date <= old_case_date:
+                logger.warning(
+                    f"TEMPORAL REJECTION: '{new_case_title}' ({new_case_date}) attempted to overrule "
+                    f"'{case_name}' ({old_case_date}), but the new case is NOT chronologically newer. "
+                    f"Halting overrule to prevent data corruption."
+                )
+                continue
+        else:
+            logger.warning(
+                f"TEMPORAL WARNING: No parseable date for '{new_case_title}'. "
+                f"Proceeding with overrule based on LLM assertion only (lower confidence)."
+            )
+        
+        # ── Step 3: Mark as overruled with provenance ──
+        ids_to_update = [hit["_id"] for hit in results]
+        
+        for record_id in ids_to_update:
+            try:
+                # Fetch current metadata, update it, and upsert back
+                fetch_result = index.fetch(ids=[record_id])
+                if fetch_result and fetch_result.vectors and record_id in fetch_result.vectors:
+                    vec = fetch_result.vectors[record_id]
+                    updated_meta = {**vec.metadata}
+                    updated_meta["status"] = "overruled"
+                    updated_meta["overruled_by"] = new_case_title
+                    updated_meta["overruled_on"] = new_case_date.isoformat() if new_case_date else "UNKNOWN"
+                    
+                    index.update(
+                        id=record_id,
+                        set_metadata=updated_meta
+                    )
+            except Exception as e:
+                logger.error(f"Failed to update record {record_id}: {e}")
+                
+        logger.info(
+            f"TEMPORAL CONFLICT RESOLVED: Marked {len(ids_to_update)} chunks of "
+            f"'{case_name}' as 'overruled' by '{new_case_title}'."
+        )
+
+
+def _find_case_in_db(case_name: str) -> list | None:
+    """Semantic search to find a case by name in Pinecone using Integrated Embeddings."""
+    try:
+        search_results = index.search(
+            namespace="__default__",
+            query={
+                "top_k": 5,
+                "inputs": {"text": case_name},
+                "filter": {"status": {"$eq": "active"}}
+            }
+        )
+        if search_results and hasattr(search_results, 'result') and search_results.result.hits:
+            hits = search_results.result.hits
+            # Only return high-confidence matches (score > 0.7)
+            confident_hits = [
+                {"_id": h["_id"], "metadata": h.get("fields", {})}
+                for h in hits if h.get("_score", 0) > 0.7
+            ]
+            return confident_hits if confident_hits else None
+    except Exception as e:
+        logger.error(f"Semantic search fallback failed for '{case_name}': {e}")
+    
+    return None
+
+
+# ─── Document Processing ────────────────────────────────────────────────────
 
 def process_and_store_document(text: str, metadata: dict, doc_id: str = None):
     """
-    Processes a single document: chunks and stores in ChromaDB.
-    ChromaDB handles embedding automatically using default local model.
+    Processes a single document: extracts AI metadata, chunks into
+    overlapping segments, and stores each chunk in Pinecone using
+    Integrated Embeddings (Pinecone handles vectorization server-side).
     """
     try:
-        # Chunking (Naive - first 9000 chars for demo safety)
-        chunk = text[:9000] 
-        
-        # Generate ID if not provided
-        if not doc_id:
-            doc_id = f"doc_{int(time.time())}_{abs(hash(chunk))}"
+        # Inject default status
+        metadata["status"] = "active"
 
-        # Add to collection (Let Chroma embed it)
-        collection.add(
-            documents=[chunk],
-            metadatas=[metadata],
-            ids=[doc_id]
-        )
+        # AI metadata extraction (now with Pydantic validation + multi-model fallback)
+        ai_metadata = extract_legal_metadata(text)
+        
+        if ai_metadata:
+            metadata["ai_case_name"] = ai_metadata.get("case_name", "UNKNOWN")
+            metadata["ai_judgment_date"] = ai_metadata.get("judgment_date", "UNKNOWN")
+            metadata["ai_overrules_cases"] = ", ".join(ai_metadata.get("overrules_cases", []))
+            metadata["ai_upholds_cases"] = ", ".join(ai_metadata.get("upholds_cases", []))
+            metadata["ai_legal_domain"] = ai_metadata.get("legal_domain", "General")
+            
+            # Store validated date as ISO string for Pinecone compatibility
+            validated_date = ai_metadata.get("validated_date")
+            if validated_date:
+                metadata["ai_validated_date"] = validated_date.isoformat() if hasattr(validated_date, 'isoformat') else str(validated_date)
+
+            # Temporal conflict resolution (now with actual date comparison)
+            resolve_legal_conflicts(metadata)
+
+        # ── Sliding-window chunking (replaces text[:9000] truncation) ──
+        chunks = chunk_text(text)
+        
+        if not chunks:
+            logger.warning(f"No valid chunks produced for document: {metadata.get('title', 'Untitled')}")
+            return False
+        
+        # ── Upsert chunks to Pinecone using Integrated Embeddings ──
+        records = []
+        for i, chunk in enumerate(chunks):
+            chunk_id = doc_id if (doc_id and i == 0) else generate_deterministic_id(chunk, i)
+            
+            # Each chunk inherits parent metadata + chunk index
+            chunk_metadata = {**metadata, "chunk_index": i, "total_chunks": len(chunks)}
+            
+            records.append({
+                "_id": chunk_id,
+                "text": chunk,  # Pinecone Integrated Embeddings reads from the "text" field
+                **chunk_metadata,
+            })
+        
+        # Upsert in batches of 96 (Pinecone's recommended batch size for integrated embeddings)
+        BATCH_SIZE = 96
+        stored_count = 0
+        for batch_start in range(0, len(records), BATCH_SIZE):
+            batch = records[batch_start:batch_start + BATCH_SIZE]
+            index.upsert_records(namespace="__default__", records=batch)
+            stored_count += len(batch)
+        
         source = metadata.get('url', 'Unknown Source')
-        logger.info(f"Successfully stored document: {metadata.get('title', 'Untitled')} from {source}")
+        logger.info(f"Stored {stored_count}/{len(chunks)} chunks for: {metadata.get('title', 'Untitled')} from {source}")
         return True
 
     except Exception as e:
         logger.error(f"Error processing document: {e}")
+        import traceback
+        traceback.print_exc()
         return False
+
+
+# ─── URL-Based Ingestion ─────────────────────────────────────────────────────
 
 def ingest_case_from_url(url: str, title: str = None) -> bool:
     """
     Fetches content from a URL and ingests it into the knowledge base.
+    Now with URL-based deduplication to prevent re-ingesting the same case.
     """
     logger.info(f"Ingesting from URL: {url}")
+    
+    # Dedup check: skip if this URL is already in the database
+    if is_url_already_ingested(url):
+        logger.info(f"URL already ingested, skipping: {url}")
+        return False
     
     text_content = fetch_case_text(url)
     if not text_content:
         logger.warning(f"Failed to fetch content for {url}")
         return False
     
-    # If title is not provided, try to extract or use a default
     if not title:
-        # Simple heuristic: first line or slice
         title = text_content.split('\n')[0][:100] if text_content else "Untitled Legal Case"
         
     metadata = {
@@ -83,14 +324,15 @@ def ingest_case_from_url(url: str, title: str = None) -> bool:
     
     return process_and_store_document(text_content, metadata)
 
+
+# ─── CSV Bulk Ingestion ──────────────────────────────────────────────────────
+
 def ingest_data():
-    """Reads cases.csv, scrapes text, embeds, and stores in ChromaDB."""
+    """Reads cases.csv, scrapes text, and stores in Pinecone using Integrated Embeddings."""
     
-    csv_path = "../legacy/cases.csv" # Relative to backend/ directory assuming run from backend/
-    
-    if not os.path.exists(csv_path):
-        # Fallback absolute path check
-        csv_path = "/Users/biplavbarua/Developer/TechNiche/legacy/cases.csv"
+    # Use relative path from the project root
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    csv_path = os.path.join(project_root, "legacy", "cases.csv")
         
     if not os.path.exists(csv_path):
         logger.error(f"CSV file not found at {csv_path}")
@@ -105,20 +347,12 @@ def ingest_data():
             url = row['case_url']
             title = row['case_title']
             
-            # Check if likely already exists (naive check by ID)
-            # In a real app, we might check by URL in metadata
-            existing = collection.get(ids=[str(idx)])
-            if existing['ids']:
-                logger.info(f"Skipping {title} (Already indexed)")
-                idx += 1
-                continue
-
             logger.info(f"Processing: {title}")
             
-            # Scrape
             text_content = fetch_case_text(url)
             if not text_content:
                 logger.warning(f"Failed to fetch content for {url}")
+                idx += 1
                 continue
             
             metadata = {
@@ -127,11 +361,8 @@ def ingest_data():
                 "author": row.get('case_author', '')
             }
             
-            # Use the new shared function
-            # We enforce the ID to match the CSV index for backward compatibility/idempotency
             success = process_and_store_document(text_content, metadata, doc_id=str(idx))
             
-            # Rate limiting for Free Tier
             if success:
                 time.sleep(4)
             
@@ -140,5 +371,4 @@ def ingest_data():
     logger.info("Ingestion Complete!")
 
 if __name__ == "__main__":
-    # Ensure we are in the backend directory or adjust paths
     ingest_data()

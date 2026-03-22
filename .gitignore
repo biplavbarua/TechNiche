@@ -44,3 +44,33 @@ htmlcov/
 # build_render.sh
 # health_check.txt
 # install_log.txt
+
+# Exclude virtual environments
+.venv/
+backend/.venv/
+
+# Exclude DBs and logs
+backend/chroma_db/
+*.log
+backend/*.log
+frontend/*.log
+# Exclude text/script files not needed
+*.txt
+*.sh
+reproduce_issue.py
+pitch_deck.md
+
+# Exclude test artifact images and dirs
+*.png
+*.webp
+frontend/playwright-report/
+frontend/test-results/
+frontend/node-v20.12.2-darwin-arm64*/
+backend/script*.py
+backend/verify_*.py
+backend/train_bot.py
+backend/test_*.py
+backend/chroma_db_test/
+frontend/playwright-test.js
+frontend/node-v20.12.2-darwin-arm64.tar.gz
+render.yaml

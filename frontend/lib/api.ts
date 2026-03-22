@@ -1,6 +1,13 @@
 export interface AnalysisResult {
     analysis: string;
     cited_cases: string[];
+    cited_cases_details?: {
+        title: string;
+        url: string;
+        snippet: string;
+    }[];
+    relevance_quality?: "high" | "low" | "none";
+    llm_cited_cases?: string[];
 }
 
 export interface CrawlResult {
@@ -9,9 +16,11 @@ export interface CrawlResult {
 }
 
 const getBackendUrl = () => {
-    // Use relative path to leverage Next.js rewrites
-    // This allows the browser to call /api/... on the same domain,
-    // and Next.js will proxy it to the actual backend.
+    // In development, talk directly to the Python backend to avoid Proxy issues.
+    if (process.env.NODE_ENV === "development") {
+        return "http://localhost:8000";
+    }
+    // In production, use relative path to leverage Next.js rewrites/Vercel proxy
     return "";
 };
 
