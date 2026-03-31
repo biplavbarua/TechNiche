@@ -34,43 +34,68 @@ class TestParseDateSafe:
 class TestTemporalConflictResolution:
     """Tests that the overruling logic respects chronological ordering."""
     
-    def _make_mock_collection(self, existing_cases: list[dict] = None):
-        """Creates a mock ChromaDB collection with pre-loaded cases."""
-        mock_collection = MagicMock()
+    def _make_mock_index(self, existing_cases: list[dict] = None):
+        """Creates a mock Pinecone index with pre-loaded cases."""
+        mock_index = MagicMock()
         
-        if existing_cases:
-            def mock_get(**kwargs):
-                where = kwargs.get("where", {})
-                matching_ids = []
-                matching_metadatas = []
-                for case in existing_cases:
-                    for key, value in where.items():
-                        if case["metadata"].get(key) == value:
-                            matching_ids.append(case["id"])
-                            matching_metadatas.append(case["metadata"].copy())
-                            break
-                return {"ids": matching_ids, "metadatas": matching_metadatas}
+        # Mock search
+        def mock_search(**kwargs):
+            query = kwargs.get("query", {})
+            filter_dict = query.get("filter", {})
+            status_filter = filter_dict.get("status", {}).get("$eq")
             
-            mock_collection.get = MagicMock(side_effect=mock_get)
-        else:
-            mock_collection.get = MagicMock(return_value={"ids": [], "metadatas": []})
+            matches = []
+            if existing_cases:
+                for case in existing_cases:
+                    if status_filter and case["metadata"].get("status") != status_filter:
+                        continue
+                    # For testing we assume a match if it's there
+                    matches.append({
+                        "_id": case["id"],
+                        "metadata": case["metadata"]
+                    })
+            return {"matches": matches}
         
-        mock_collection.query = MagicMock(return_value={"ids": [[]], "metadatas": [[]], "distances": [[]]})
-        mock_collection.update = MagicMock()
+        mock_index.search = MagicMock(side_effect=mock_search)
         
-        return mock_collection
+        # Mock fetch
+        def mock_fetch(ids=None, **kwargs):
+            vectors = {}
+            if existing_cases:
+                for case in existing_cases:
+                    if case["id"] in ids:
+                        # Wrap metadata in an object that has it as an attribute
+                        # Since ingest.py uses vec.metadata
+                        vector_obj = MagicMock()
+                        vector_obj.metadata = case["metadata"]
+                        vectors[case["id"]] = vector_obj
+            
+            result = MagicMock()
+            result.vectors = vectors
+            return result
+            
+        mock_index.fetch = MagicMock(side_effect=mock_fetch)
+        mock_index.update = MagicMock()
+        
+        return mock_index
     
-    def test_newer_case_overrules_older_case(self):
+    @patch("app.ingest._find_case_in_db")
+    def test_newer_case_overrules_older_case(self, mock_find):
         """A 2026 case should successfully overrule a 2021 case."""
-        old_case = {
-            "id": "id_old",
-            "metadata": {
-                "title": "Tech Innovations vs Karnataka (2021)",
-                "ai_judgment_date": "2021-05-15",
-                "status": "active"
-            }
+        old_case_id = "id_old"
+        old_case_meta = {
+            "title": "Tech Innovations vs Karnataka (2021)",
+            "ai_judgment_date": "2021-05-15",
+            "status": "active"
         }
-        mock_collection = self._make_mock_collection([old_case])
+        
+        # _find_case_in_db returns matches
+        mock_find.return_value = [{
+            "_id": old_case_id,
+            "metadata": old_case_meta
+        }]
+        
+        mock_index = self._make_mock_index([{"id": old_case_id, "metadata": old_case_meta}])
         
         new_metadata = {
             "title": "Union of India vs Tech Innovations (2026)",
@@ -79,28 +104,32 @@ class TestTemporalConflictResolution:
             "status": "active"
         }
         
-        resolve_legal_conflicts(mock_collection, new_metadata)
+        resolve_legal_conflicts(new_metadata, index=mock_index)
         
-        # Verify update was called (meaning the old case was marked as overruled)
-        mock_collection.update.assert_called_once()
-        call_args = mock_collection.update.call_args
-        updated_metadatas = call_args[1]["metadatas"] if "metadatas" in call_args[1] else call_args[0][1] if len(call_args[0]) > 1 else None
+        # Verify update was called
+        mock_index.update.assert_called_once()
+        call_args = mock_index.update.call_args
+        updated_meta = call_args[1]["set_metadata"]
         
-        if updated_metadatas:
-            assert updated_metadatas[0]["status"] == "overruled"
-            assert updated_metadatas[0]["overruled_by"] == "Union of India vs Tech Innovations (2026)"
+        assert updated_meta["status"] == "overruled"
+        assert updated_meta["overruled_by"] == "Union of India vs Tech Innovations (2026)"
     
-    def test_older_case_cannot_overrule_newer_case(self):
+    @patch("app.ingest._find_case_in_db")
+    def test_older_case_cannot_overrule_newer_case(self, mock_find):
         """A 2015 case claiming to overrule a 2020 case should be REJECTED."""
-        newer_existing_case = {
-            "id": "id_newer",
-            "metadata": {
-                "title": "Modern Case (2020)",
-                "ai_judgment_date": "2020-08-20",
-                "status": "active"
-            }
+        newer_case_id = "id_newer"
+        newer_case_meta = {
+            "title": "Modern Case (2020)",
+            "ai_judgment_date": "2020-08-20",
+            "status": "active"
         }
-        mock_collection = self._make_mock_collection([newer_existing_case])
+        
+        mock_find.return_value = [{
+            "_id": newer_case_id,
+            "metadata": newer_case_meta
+        }]
+        
+        mock_index = self._make_mock_index([{"id": newer_case_id, "metadata": newer_case_meta}])
         
         # An old case claims to overrule a newer one
         old_case_metadata = {
@@ -110,22 +139,27 @@ class TestTemporalConflictResolution:
             "status": "active"
         }
         
-        resolve_legal_conflicts(mock_collection, old_case_metadata)
+        resolve_legal_conflicts(old_case_metadata, index=mock_index)
         
         # update should NOT be called — temporal rejection
-        mock_collection.update.assert_not_called()
+        mock_index.update.assert_not_called()
     
-    def test_same_date_does_not_overrule(self):
+    @patch("app.ingest._find_case_in_db")
+    def test_same_date_does_not_overrule(self, mock_find):
         """Cases with the same judgment date should NOT overrule each other."""
-        existing_case = {
-            "id": "id_same",
-            "metadata": {
-                "title": "Same Day Case",
-                "ai_judgment_date": "2023-06-01",
-                "status": "active"
-            }
+        existing_case_id = "id_same"
+        existing_case_meta = {
+            "title": "Same Day Case",
+            "ai_judgment_date": "2023-06-01",
+            "status": "active"
         }
-        mock_collection = self._make_mock_collection([existing_case])
+        
+        mock_find.return_value = [{
+            "_id": existing_case_id,
+            "metadata": existing_case_meta
+        }]
+        
+        mock_index = self._make_mock_index([{"id": existing_case_id, "metadata": existing_case_meta}])
         
         new_metadata = {
             "title": "Another Same Day Case",
@@ -134,14 +168,16 @@ class TestTemporalConflictResolution:
             "status": "active"
         }
         
-        resolve_legal_conflicts(mock_collection, new_metadata)
+        resolve_legal_conflicts(new_metadata, index=mock_index)
         
         # Should NOT overrule (new_case_date <= old_case_date)
-        mock_collection.update.assert_not_called()
+        mock_index.update.assert_not_called()
     
-    def test_no_overrules_field_is_noop(self):
+    @patch("app.ingest.get_pinecone_index")
+    def test_no_overrules_field_is_noop(self, mock_get_index):
         """If ai_overrules_cases is empty, nothing happens."""
-        mock_collection = self._make_mock_collection()
+        mock_index = self._make_mock_index()
+        mock_get_index.return_value = mock_index
         
         metadata = {
             "title": "Peaceful Case",
@@ -150,12 +186,16 @@ class TestTemporalConflictResolution:
             "status": "active"
         }
         
-        resolve_legal_conflicts(mock_collection, metadata)
-        mock_collection.update.assert_not_called()
+        resolve_legal_conflicts(metadata)
+        mock_index.update.assert_not_called()
     
-    def test_overruled_case_not_in_db_skips_gracefully(self):
+    @patch("app.ingest._find_case_in_db")
+    @patch("app.ingest.get_pinecone_index")
+    def test_overruled_case_not_in_db_skips_gracefully(self, mock_get_index, mock_find):
         """If the overruled case isn't in the DB, log and skip — don't crash."""
-        mock_collection = self._make_mock_collection()  # empty DB
+        mock_index = self._make_mock_index()  # empty DB
+        mock_get_index.return_value = mock_index
+        mock_find.return_value = []
         
         metadata = {
             "title": "New Case (2026)",
@@ -165,20 +205,25 @@ class TestTemporalConflictResolution:
         }
         
         # Should not raise any exception
-        resolve_legal_conflicts(mock_collection, metadata)
-        mock_collection.update.assert_not_called()
+        resolve_legal_conflicts(metadata)
+        mock_index.update.assert_not_called()
     
-    def test_unknown_new_date_still_overrules_with_warning(self):
+    @patch("app.ingest._find_case_in_db")
+    def test_unknown_new_date_still_overrules_with_warning(self, mock_find):
         """If the new case has no parseable date, proceed with LLM assertion (lower confidence)."""
-        old_case = {
-            "id": "id_old",
-            "metadata": {
-                "title": "Dated Case (2020)",
-                "ai_judgment_date": "2020-01-01",
-                "status": "active"
-            }
+        old_case_id = "id_old"
+        old_case_meta = {
+            "title": "Dated Case (2020)",
+            "ai_judgment_date": "2020-01-01",
+            "status": "active"
         }
-        mock_collection = self._make_mock_collection([old_case])
+        
+        mock_find.return_value = [{
+            "_id": old_case_id,
+            "metadata": old_case_meta
+        }]
+        
+        mock_index = self._make_mock_index([{"id": old_case_id, "metadata": old_case_meta}])
         
         new_metadata = {
             "title": "Undated Case",
@@ -187,10 +232,14 @@ class TestTemporalConflictResolution:
             "status": "active"
         }
         
-        resolve_legal_conflicts(mock_collection, new_metadata)
+        resolve_legal_conflicts(new_metadata, index=mock_index)
         
         # Should still overrule (no date to reject, so we trust the LLM with a warning)
-        mock_collection.update.assert_called_once()
+        mock_index.update.assert_called_once()
+        call_args = mock_index.update.call_args
+        assert call_args[1]["id"] == old_case_id
+        assert call_args[1]["set_metadata"]["status"] == "overruled"
+
 
 
 class TestChunking:

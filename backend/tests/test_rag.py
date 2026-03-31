@@ -49,14 +49,14 @@ class TestDomainDetection:
     
     def test_detects_common_domain(self):
         metadatas = [
-            {"ai_legal_domain": "Intellectual Property"},
-            {"ai_legal_domain": "Intellectual Property"},
-            {"ai_legal_domain": "Tax Law"}
+            {"metadata": {"ai_legal_domain": "Intellectual Property"}},
+            {"metadata": {"ai_legal_domain": "Intellectual Property"}},
+            {"metadata": {"ai_legal_domain": "Tax Law"}}
         ]
         assert _detect_legal_domain(metadatas) == "Intellectual Property"
     
     def test_falls_back_to_indian_law(self):
-        metadatas = [{"ai_legal_domain": "General"}, {}]
+        metadatas = [{"metadata": {"ai_legal_domain": "General"}}, {"metadata": {}}]
         assert _detect_legal_domain(metadatas) == "Indian Law"
     
     def test_empty_metadatas(self):
@@ -64,8 +64,8 @@ class TestDomainDetection:
     
     def test_ignores_unknown_and_general(self):
         metadatas = [
-            {"ai_legal_domain": "UNKNOWN"},
-            {"ai_legal_domain": "General"},
-            {"ai_legal_domain": "Corporate Law"}
+            {"metadata": {"ai_legal_domain": "UNKNOWN"}},
+            {"metadata": {"ai_legal_domain": "General"}},
+            {"metadata": {"ai_legal_domain": "Corporate Law"}}
         ]
         assert _detect_legal_domain(metadatas) == "Corporate Law"

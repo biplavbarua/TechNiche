@@ -1,14 +1,29 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from app.core.rag import query_legal_assistant
+from app.core.rag import query_legal_assistant, EMBED_MODEL
 from app.core.crawler import crawl_and_ingest
-from app.ingest import index, ingest_case_from_url
+from app.ingest import ingest_case_from_url
+from app.utils.pinecone import get_pinecone_index, get_pinecone_client
 import time
+import os
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import HttpUrl
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="Legal AI Assistant API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Verify Pinecone connection on startup
+    try:
+        index = get_pinecone_index()
+        # Get the index stats to verify connection
+        stats = index.describe_index_stats()
+        print(f"Connected to Pinecone index: {os.getenv('PINECONE_INDEX_NAME')}")
+        print(f"Total vector count: {stats['total_vector_count']}")
+    except Exception as e:
+        print(f"Warning: Could not connect to Pinecone on startup: {e}")
+    yield
+
+app = FastAPI(title="Legal AI Assistant API", lifespan=lifespan)
 
 # Allow CORS for frontend
 app.add_middleware(
@@ -25,15 +40,15 @@ class AnalysisRequest(BaseModel):
 class QueryRequest(BaseModel):
     query: str
 
-@app.get("/")
-def read_root():
-    return {"status": "Legal AI Backend is running"}
-
 class CrawlRequest(BaseModel):
     url: str
 
 class LearnRequest(BaseModel):
     url: str
+
+@app.get("/")
+def read_root():
+    return {"status": "Legal AI Backend is running"}
 
 @app.post("/api/crawl")
 def crawl_url(request: CrawlRequest):
@@ -48,8 +63,6 @@ def crawl_url(request: CrawlRequest):
         
         # 2. Ingest found cases
         for case in cases:
-            # Check if likely already exists is handled inside ingest, but doing it here saves a fetch call
-            # We will just call our robust function
             success = ingest_case_from_url(case['url'], title=case['title'])
             if success:
                 ingested_count += 1
@@ -83,8 +96,6 @@ def analyze_idea(request: AnalysisRequest):
         result = query_legal_assistant(request.idea)
         return JSONResponse(content=result)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/query")
@@ -96,8 +107,6 @@ def query_assistant(request: QueryRequest):
         result = query_legal_assistant(request.query)
         return JSONResponse(content=result)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/cases")
@@ -106,12 +115,13 @@ def get_cases():
     Fetch all ingested cases by doing a generic search.
     """
     try:
-        from app.core.rag import index, EMBED_MODEL, pc
+        pc = get_pinecone_client()
+        index = get_pinecone_index()
         
-        # Perform similarity search using inference
+        # Perform similarity search using inference to find cases
         embedding = pc.inference.embed(
             model=EMBED_MODEL,
-            inputs=["law case judgment summary"],
+            inputs=["law case judgment summary research document"],
             parameters={"input_type": "query"}
         )
         
@@ -126,24 +136,15 @@ def get_cases():
         cases = []
         if search_results and hasattr(search_results, 'matches'):
             for match in search_results.matches:
-                fields = match.metadata or {}
-                
-                case_data = {
+                meta = match.metadata
+                cases.append({
                     "id": match.id,
-                    "title": fields.get("title", "Unknown Case"),
-                    "url": fields.get("url", ""),
-                    "judgment_date": fields.get("ai_judgment_date", fields.get("date", "Unknown")),
-                    "domain": fields.get("ai_legal_domain", fields.get("domain", "General")),
-                    "summary": fields.get("ai_summary", fields.get("text", "No summary available.")),
-                    "status": fields.get("status", "active"),
-                }
-                cases.append(case_data)
+                    "title": meta.get("title", "Unknown Case"),
+                    "url": meta.get("url", ""),
+                    "score": match.score
+                })
         
-        # Sort alphabetically by title
-        cases.sort(key=lambda x: x["title"])
         return {"cases": cases}
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
+        print(f"Error fetching cases: {e}")
+        return {"cases": [], "error": str(e)}

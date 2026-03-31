@@ -6,9 +6,9 @@ import logging
 import time
 from datetime import date, datetime
 
-from pinecone import Pinecone
 from app.core.scraper import fetch_case_text
 from app.core.extraction import extract_legal_metadata
+from app.utils.pinecone import get_pinecone_index
 from dotenv import load_dotenv
 
 # ─── Setup ────────────────────────────────────────────────────────────────────
@@ -17,16 +17,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-
-# ─── Pinecone Client ─────────────────────────────────────────────────────────
-
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-if not PINECONE_API_KEY:
-    raise EnvironmentError("PINECONE_API_KEY not found in environment variables. Add it to your .env file.")
-
-pc = Pinecone(api_key=PINECONE_API_KEY)
-INDEX_NAME = "techniche-legal-index"
-index = pc.Index(INDEX_NAME)
 
 # The embedding model hosted by Pinecone (Integrated Inference)
 EMBED_MODEL = "llama-text-embed-v2"
@@ -79,6 +69,29 @@ def generate_deterministic_id(text: str, chunk_index: int = 0) -> str:
     return f"doc_{content_hash}_chunk{chunk_index}"
 
 
+def is_pinecone_available() -> bool:
+    """Verifies Pinecone connection by attempting to list or search."""
+    try:
+        index = get_pinecone_index()
+        # Attempt a minimal search or list operation
+        results = index.list(prefix=None, limit=1)
+        if results:
+            return True
+        search_results = index.search(
+            namespace="__default__",
+            query={
+                "top_k": 1,
+                "inputs": {"text": "test query"},
+            },
+            model=EMBED_MODEL,
+        )
+        if search_results:
+            return True
+    except Exception as e:
+        logger.error(f"Pinecone availability check failed: {e}")
+    return False
+
+
 def is_url_already_ingested(url: str) -> bool:
     """
     Checks if a URL has already been ingested by querying Pinecone metadata.
@@ -87,8 +100,7 @@ def is_url_already_ingested(url: str) -> bool:
     repeated /api/learn/url calls would store the same case N times.
     """
     try:
-        # Use list() with a metadata filter to check for existing URL
-        results = index.list(prefix=None, limit=1)
+        index = get_pinecone_index()
         # Pinecone doesn't support direct metadata-only filtering on list,
         # so we do a dummy search with a filter instead.
         search_results = index.search(
@@ -121,9 +133,9 @@ def parse_date_safe(date_str: str) -> date | None:
     return None
 
 
-def resolve_legal_conflicts(extracted_metadata: dict):
+def resolve_legal_conflicts(new_metadata: dict, index=None):
     """
-    Temporal Conflict Resolution — the novel core of this pipeline.
+    Temporal conflict resolution — ensures newer judgments overrule older ones.
     
     When a new case overrules prior cases, this function:
     1. Finds the overruled cases in the vector database.
@@ -133,12 +145,14 @@ def resolve_legal_conflicts(extracted_metadata: dict):
     This prevents hallucinated overruling (LLM claiming A overrules B
     when B is actually the newer decision) and provides an auditable trail.
     """
-    overrules_str = extracted_metadata.get("ai_overrules_cases", "")
+    overrules_str = new_metadata.get("ai_overrules_cases", "")
     if not overrules_str:
         return
-        
-    new_case_title = extracted_metadata.get("title", extracted_metadata.get("ai_case_name", "Unknown Case"))
-    new_case_date_str = extracted_metadata.get("ai_judgment_date", "UNKNOWN")
+    
+    if index is None:
+        index = get_pinecone_index()
+    new_case_title = new_metadata.get("title", new_metadata.get("ai_case_name", "Unknown Case"))
+    new_case_date_str = new_metadata.get("ai_judgment_date", "UNKNOWN")
     new_case_date = parse_date_safe(new_case_date_str)
     
     overruled_cases = [c.strip() for c in overrules_str.split(",") if c.strip()]
@@ -201,6 +215,7 @@ def resolve_legal_conflicts(extracted_metadata: dict):
 def _find_case_in_db(case_name: str) -> list | None:
     """Semantic search to find a case by name in Pinecone using Integrated Embeddings."""
     try:
+        index = get_pinecone_index()
         search_results = index.search(
             namespace="__default__",
             query={
@@ -209,14 +224,18 @@ def _find_case_in_db(case_name: str) -> list | None:
                 "filter": {"status": {"$eq": "active"}}
             }
         )
-        if search_results and hasattr(search_results, 'result') and search_results.result.hits:
-            hits = search_results.result.hits
-            # Only return high-confidence matches (score > 0.7)
-            confident_hits = [
-                {"_id": h["_id"], "metadata": h.get("fields", {})}
-                for h in hits if h.get("_score", 0) > 0.7
-            ]
-            return confident_hits if confident_hits else None
+        # Pinecone's new search API returns results under the 'matches' key directly
+        # The old API returned them under search_results.result.hits
+        matches = search_results.get("matches", [])
+        if not matches and hasattr(search_results, 'result') and hasattr(search_results.result, 'hits'):
+            matches = search_results.result.hits
+
+        # Only return high-confidence matches (score > 0.7)
+        confident_matches = [
+            {"_id": m["_id"], "metadata": m.get("fields", {})}
+            for m in matches if m.get("_score", 0) > 0.7
+        ]
+        return confident_matches if confident_matches else None
     except Exception as e:
         logger.error(f"Semantic search fallback failed for '{case_name}': {e}")
     
@@ -227,15 +246,17 @@ def _find_case_in_db(case_name: str) -> list | None:
 
 def process_and_store_document(text: str, metadata: dict, doc_id: str = None):
     """
-    Processes a single document: extracts AI metadata, chunks into
-    overlapping segments, and stores each chunk in Pinecone using
-    Integrated Embeddings (Pinecone handles vectorization server-side).
+    Refined ingestion pipeline:
+    1. Extracts high-fidelity legal metadata via LLM.
+    2. Resolves temporal conflicts (new cases overrule old ones).
+    3. Splits text into overlapping chunks (sliding window).
+    4. Stores each chunk in Pinecone with full parent metadata + chunk lineage.
     """
     try:
-        # Inject default status
-        metadata["status"] = "active"
-
-        # AI metadata extraction (now with Pydantic validation + multi-model fallback)
+        index = get_pinecone_index()
+        
+        # ── Step 1: Legal extraction & Enrichment ──
+        # Uses GPT-4o to identify case name, date, and overrule/uphold relationships.
         ai_metadata = extract_legal_metadata(text)
         
         if ai_metadata:
@@ -319,7 +340,8 @@ def ingest_case_from_url(url: str, title: str = None) -> bool:
         "title": title,
         "url": url,
         "source": "autonomous_learning",
-        "ingested_at": str(time.time())
+        "ingested_at": str(time.time()),
+        "status": "active"
     }
     
     return process_and_store_document(text_content, metadata)
@@ -358,7 +380,8 @@ def ingest_data():
             metadata = {
                 "title": title, 
                 "url": url, 
-                "author": row.get('case_author', '')
+                "author": row.get('case_author', ''),
+                "status": "active"
             }
             
             success = process_and_store_document(text_content, metadata, doc_id=str(idx))

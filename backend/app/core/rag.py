@@ -25,16 +25,21 @@ except Exception as e:
 
 # ─── Pinecone Client ─────────────────────────────────────────────────────────
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-if not PINECONE_API_KEY:
-    raise EnvironmentError("PINECONE_API_KEY not found in environment variables.")
+from app.utils.pinecone import get_pinecone_client, get_pinecone_index
 
-pc = Pinecone(api_key=PINECONE_API_KEY)
-INDEX_NAME = "techniche-legal-index"
-index = pc.Index(INDEX_NAME)
-
-# The embedding model hosted by Pinecone (Integrated Inference)
+# Constants
 EMBED_MODEL = "llama-text-embed-v2"
+TOP_K = 50 # Increased for better recall
+SIMILARITY_THRESHOLD = 0.5  # Ignore anything below 50% match
+
+# Initializing Pinecone index
+# Initializing Pinecone index
+try:
+    index = get_pinecone_index()
+except Exception as e:
+    print(f"Warning: Failed to initialize Pinecone index: {e}")
+    index = None
+
 
 # ─── LLM Models (Free models fallback cascade) ───────────────────────────────
 
@@ -75,114 +80,108 @@ def get_llm_response(prompt: str) -> str:
     return f"Error from AI Provider (All models failed). Last error: {str(last_error)}"
 
 
-def _assess_relevance(hits: list, user_query: str) -> dict:
+def _assess_relevance(query: str, search_results: dict) -> bool:
     """
-    Intelligent relevance assessment using score distribution analysis.
-    
-    The llama-text-embed-v2 model produces cosine similarity scores in a
-    compressed range (~0.20–0.40). A static threshold cannot separate
-    relevant from irrelevant because BOTH score similarly low.
-    
-    Instead we use TWO signals:
-    
-    1. ABSOLUTE FLOOR — Any top score below 0.30 is definitely irrelevant.
-    2. SCORE GAP — If the top score is not meaningfully higher than the
-       median score, the query doesn't match any specific case better 
-       than random noise — so nothing is truly relevant.
-    3. LLM RELEVANCE CHECK — As a final gate, we ask the LLM directly 
-       whether the top retrieved case is actually relevant to the query.
+    Assesses if the search results contain any information relevant to the query.
+    Uses a 'Multi-Hit Verification' strategy: if the top 3 results don't clearly
+    address the query, we treat it as potentially irrelevant.
     """
+    hits = search_results.get("matches", [])
     if not hits:
-        return {"is_relevant": False, "relevant_hits": [], "reason": "no_hits"}
-    
-    scores = [h.get("_score", 0) for h in hits]
-    top_score = max(scores)
-    median_score = sorted(scores)[len(scores) // 2]
-    score_gap = top_score - median_score
-    avg_score = sum(scores) / len(scores)
-    
-    print(f"DEBUG RELEVANCE: top={top_score:.4f}, median={median_score:.4f}, "
-          f"avg={avg_score:.4f}, gap={score_gap:.4f}")
-    
-    # Gate 1: Absolute floor — nothing useful below 0.30
-    if top_score < 0.30:
-        return {
-            "is_relevant": False,
-            "relevant_hits": [],
-            "reason": f"top_score_too_low ({top_score:.4f} < 0.30)"
-        }
-    
-    # Gate 2: Score gap — the top hit must stand out from the crowd.
-    # If gap < 0.03, all hits are equally (ir)relevant.
-    if score_gap < 0.03:
-        return {
-            "is_relevant": False,
-            "relevant_hits": [],
-            "reason": f"no_score_gap (gap={score_gap:.4f} < 0.03, all hits equally poor)"
-        }
-    
-    # Gate 3: LLM quick relevance check
-    # Ask the LLM to verify the top hit is actually related to the query.
-    top_hit = hits[0]
-    top_title = top_hit.get("fields", {}).get("title", "Unknown")
-    top_text = top_hit.get("fields", {}).get("text", "")[:500]
-    
-    relevance_prompt = f"""You are a relevance classifier. Determine if the following legal case is ACTUALLY RELEVANT to the user's query.
+        return False
 
-USER QUERY: {user_query}
+    # Multi-Hit Verification: Check top 3 hits for a minimum threshold
+    top_hits = hits[:3]
+    max_score = max(hit.get("_score", 0) for hit in top_hits) # Changed from 'score' to '_score' for Pinecone
+    
+    # If the highest score is very low, it's definitely not relevant
+    if max_score < 0.25:
+        return False
 
-RETRIEVED CASE TITLE: {top_title}
-RETRIEVED CASE EXCERPT: {top_text}
+    # Use LLM for a nuanced relevance check on the top candidates
+    context_snippet = ""
+    for i, hit in enumerate(top_hits):
+        # Pinecone returns metadata in 'fields' for serverless, or 'metadata' for pod
+        meta = hit.get("fields", {}) or hit.get("metadata", {})
+        text = meta.get("text", "")[:300]
+        context_snippet += f"Result {i+1}:\n{text}\n---\n"
 
-Answer with ONLY one word: RELEVANT or IRRELEVANT
-
-Think carefully: Does this case's subject matter genuinely relate to the legal question being asked? A trademark case is NOT relevant to a query about naming a child. A copyright case is NOT relevant to a query about criminal law. Only answer RELEVANT if the case's legal domain directly addresses the user's question."""
+    prompt = f"""
+    Query: {query}
+    
+    Search Results:
+    {context_snippet}
+    
+    Does any of the above search results contain information that could help answer the query?
+    Answer 'YES' if there is a potential match or 'NO' if it's completely irrelevant.
+    """
     
     try:
-        relevance_check = get_llm_response(relevance_prompt).strip().upper()
-        print(f"DEBUG RELEVANCE CHECK: LLM says '{relevance_check}' for '{top_title}'")
-        
-        # Extract the core answer — LLMs sometimes add reasoning
-        is_relevant_llm = "RELEVANT" in relevance_check and "IRRELEVANT" not in relevance_check
+        decision = get_llm_response(prompt).strip().upper()
+        return "YES" in decision
     except Exception as e:
-        print(f"DEBUG: LLM relevance check failed: {e}")
-        # If the check fails, be conservative — assume irrelevant for low scores
-        is_relevant_llm = top_score > 0.40
-    
-    if not is_relevant_llm:
-        return {
-            "is_relevant": False,
-            "relevant_hits": [],
-            "reason": f"llm_classified_irrelevant (top_title='{top_title}')"
-        }
-    
-    # All gates passed — return the hits that are above (median + 0.01)
-    # This naturally filters out the noise floor.
-    threshold = median_score + 0.01
-    relevant_hits = [h for h in hits if h.get("_score", 0) >= threshold]
-    
-    return {
-        "is_relevant": True,
-        "relevant_hits": relevant_hits,
-        "reason": f"passed_all_gates (top={top_score:.4f}, gap={score_gap:.4f})"
-    }
+        print(f"Error in LLM relevance assessment: {e}") # Changed from logger.error to print
+        # Fallback to score-based heuristic
+        return max_score > 0.35
+
+def _filter_diversity(hits: list, max_per_case: int = 2, min_cases: int = 3) -> list:
+    """
+    Filters hits to maintain diversity, preventing a single case from dominating the results.
+    - max_per_case: Max chunks to take from a single case.
+    - min_cases: Try to include at least this many distinct cases if available.
+    """
+    selected = []
+    seen_cases = {} # case_title -> count
+
+    for hit in hits:
+        # Pinecone returns metadata in 'fields' for serverless, or 'metadata' for pod
+        meta = hit.get("fields", {}) or hit.get("metadata", {})
+        title = meta.get("title", "Unknown Case").strip()
+        
+        # Count for this specific case
+        current_count = seen_cases.get(title, 0)
+        
+        # If we already have enough from this case AND we have reached our min_cases threshold, skip
+        if current_count >= max_per_case and len(seen_cases) >= min_cases:
+            continue
+        
+        selected.append(hit)
+        seen_cases[title] = current_count + 1
+        
+        # Stop if we have enough total context
+        if len(selected) >= 10:
+            break
+            
+    return selected
 
 
 def _detect_legal_domain(hits: list) -> str:
     """
-    Extracts the dominant legal domain from retrieved chunk metadata.
-    Falls back to 'Indian Law' if no domain is found.
+    Looks at the top 3 hits and extracts the legal domain from metadata.
+    Returns 'Indian Law' as fallback.
     """
+    if not hits:
+        return "Indian Law"
+        
     domains = []
-    for hit in hits:
-        fields = hit.get("fields", {})
-        domain = fields.get("ai_legal_domain", "")
-        if domain and domain != "General" and domain != "UNKNOWN":
-            domains.append(domain)
-    
+    for hit in hits[:3]:
+        # Pinecone metadata format can vary slightly based on serverless vs pod
+        # Safely access metadata or fields
+        meta = {}
+        if isinstance(hit, dict):
+            meta = hit.get("metadata") or hit.get("fields", {})
+        elif hasattr(hit, "metadata"):
+            meta = hit.metadata
+            
+        if meta and isinstance(meta, dict):
+            domain = meta.get("legal_domain") or meta.get("ai_legal_domain")
+            if domain and domain.lower() not in {"general", "unknown"}:
+                domains.append(domain)
+            
     if not domains:
         return "Indian Law"
-    
+        
+    # Return the most frequent domain
     from collections import Counter
     return Counter(domains).most_common(1)[0][0]
 
@@ -276,7 +275,7 @@ def query_legal_assistant(user_query: str):
         search_results = index.search(
             namespace="__default__",
             query={
-                "top_k": 20,
+                "top_k": TOP_K,
                 "inputs": {"text": user_query},
                 "filter": {"status": {"$eq": "active"}}
             }
@@ -289,76 +288,49 @@ def query_legal_assistant(user_query: str):
         print(f"DEBUG: Pinecone search returned {len(hits)} raw hits.")
         for hit in hits:
             score = hit.get("_score", 0)
-            title = hit.get("fields", {}).get("title", "Unknown")
+            # Pinecone returns metadata in 'fields' for serverless, or 'metadata' for pod
+            meta = hit.get("fields", {}) or hit.get("metadata", {})
+            title = meta.get("title", "Unknown")
             print(f"  HIT: score={score:.4f}  title={title}")
         
         # ── 2. Multi-gate relevance assessment ──
-        relevance = _assess_relevance(hits, user_query)
-        print(f"DEBUG RELEVANCE DECISION: is_relevant={relevance['is_relevant']}, "
-              f"reason={relevance['reason']}, "
-              f"hits_passing={len(relevance['relevant_hits'])}")
+        # The new _assess_relevance expects the raw search_results dict, not just hits
+        is_relevant = _assess_relevance(user_query, search_results.result.to_dict()) # Pass the full result dict
+        print(f"DEBUG RELEVANCE DECISION: is_relevant={is_relevant}")
         
-        if relevance["is_relevant"] and relevance["relevant_hits"]:
+        if is_relevant and hits: # If LLM says relevant, proceed with filtering
             has_relevant_context = True
-            relevant_hits = relevance["relevant_hits"]
-            seen_titles = set()
-            selected_docs = []
             
-            # Diversity Filter: Prioritize chunks from different cases
-            for hit in relevant_hits:
-                fields = hit.get("fields", {})
-                title = fields.get("title", "Unknown Case")
-                clean_title = title.strip()
-                chunk_text = fields.get("text", "")
-                
-                # Stop if we have enough context (max 7 chunks)
-                if len(selected_docs) >= 7:
-                    break
-                    
-                is_valid_title = (
-                    clean_title 
-                    and clean_title not in ('Unknown Case', 'UNKNOWN', 'Full Document') 
-                    and not clean_title.startswith('[')
-                )
-                
-                # Force diversity: max 2 chunks per case until we have 3 distinct cases
-                chunk_count_for_case = sum(1 for c in selected_docs if c['title'] == clean_title)
-                if is_valid_title and chunk_count_for_case >= 2 and len(seen_titles) < 3:
-                    continue 
-                
-                selected_docs.append({
-                    'doc': chunk_text, 
-                    'fields': fields, 
-                    'title': clean_title,
-                    'score': hit.get("_score", 0)
-                })
-                if is_valid_title:
-                    seen_titles.add(clean_title)
+            # Apply Diversity Filtering
+            selected_docs_raw = _filter_diversity(hits)
 
-            # Build context from selected_docs
-            for item in selected_docs:
-                doc = item['doc']
-                fields = item['fields']
-                title = fields.get('title', 'Unknown Case')
-                clean_title = item['title']
-                score = item['score']
-                
-                domain = fields.get('ai_legal_domain', '')
-                judgment_date = fields.get('ai_judgment_date', '')
+            # Format context for LLM
+            context_text = ""
+            for doc_hit in selected_docs_raw:
+                # Pinecone returns metadata in 'fields' for serverless, or 'metadata' for pod
+                meta = doc_hit.get("fields", {}) or doc_hit.get("metadata", {})
+                title = meta.get("title", "Unknown Case")
+                text = meta.get("text", "")
+                score = doc_hit.get("_score", 0)
+
+                clean_title = title.strip()
+
+                domain = meta.get('ai_legal_domain', '')
+                judgment_date = meta.get('ai_judgment_date', '')
                 date_info = f" (Decided: {judgment_date})" if judgment_date and judgment_date != "UNKNOWN" else ""
                 domain_info = f" [{domain}]" if domain and domain != "General" else ""
                 
-                context_text += f"\nCase: {title}{date_info}{domain_info} [Relevance: {score:.2f}]\nContent: {doc[:1500]}...\n"
+                context_text += f"\nCase: {title}{date_info}{domain_info} [Relevance: {score:.2f}]\nContent: {text[:1500]}...\n"
                 
                 if clean_title and clean_title not in ('Unknown Case', 'UNKNOWN', 'Full Document') and not clean_title.startswith('['):
                     if clean_title not in cited_cases:
                         cited_cases.append(clean_title)
-                        snippet = doc.strip()
+                        snippet = text.strip()
                         if len(snippet) > 400:
                             snippet = snippet[:400] + "..."
                         cited_cases_details.append({
                             "title": clean_title,
-                            "url": fields.get('url', ''),
+                            "url": meta.get('url', ''),
                             "snippet": snippet
                         })
                 
