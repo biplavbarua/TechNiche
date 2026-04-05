@@ -54,9 +54,13 @@ backend/chroma_db/
 *.log
 backend/*.log
 frontend/*.log
-# Exclude text/script files not needed
+# Exclude text/script files not needed in repo root
 *.txt
 *.sh
+# But always include requirements files (needed by CI)
+!backend/requirements*.txt
+!README.md
+!backend/scripts/README.md
 reproduce_issue.py
 pitch_deck.md
 
