@@ -6,7 +6,7 @@
 
 ---
 
-## Phase 1 — Codebase Cleanup & Dependency Hardening
+## Phase 1: Codebase Cleanup & Dependency Hardening
 **Goal:** Clean foundation before adding features. Remove dead code, pin deps, restructure loose scripts.
 
 ### Plans
@@ -22,7 +22,7 @@
 
 ---
 
-## Phase 2 — Error Handling & Input Validation
+## Phase 2: Error Handling & Input Validation
 **Goal:** No raw exceptions ever reach the client. All endpoints validate inputs strictly.
 
 ### Plans
@@ -38,7 +38,7 @@
 
 ---
 
-## Phase 3 — New Endpoints (Health & Stats)
+## Phase 3: New Endpoints (Health & Stats)
 **Goal:** Observable backend — health and statistics endpoints for demo and monitoring.
 
 ### Plans
@@ -52,7 +52,7 @@
 
 ---
 
-## Phase 4 — Retry Logic & Async Optimization
+## Phase 4: Retry Logic & Async Optimization
 **Goal:** Transient failures auto-recover. I/O-bound endpoints use async properly.
 
 ### Plans
@@ -68,7 +68,7 @@
 
 ---
 
-## Phase 5 — Comprehensive Test Suite
+## Phase 5: Comprehensive Test Suite
 **Goal:** Every patent claim demonstrated by passing tests. Zero untested code paths in core modules.
 
 ### Plans
@@ -85,7 +85,7 @@
 
 ---
 
-## Phase 6 — Final Audit & Documentation
+## Phase 6: Final Audit & Documentation
 **Goal:** Patent-demo ready. Everything documented, startup validated, no loose ends.
 
 ### Plans

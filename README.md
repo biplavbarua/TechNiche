@@ -31,8 +31,8 @@ TechNiche introduces a novel backend architecture designed for accuracy in legal
 
 ### Backend
 - **Framework**: [FastAPI](https://fastapi.tiangolo.com/)
-- **Language**: Python 3.9+
-- **Vector Store**: [ChromaDB](https://www.trychroma.com/) (Persistent)
+- **Language**: Python 3.10+
+- **Vector Store**: [Pinecone](https://www.pinecone.io/) (Serverless)
 - **AI Models**: OpenRouter (multi-model fallback cascade with 10 free models)
 - **Extraction**: Pydantic-validated structured output from LLMs
 - **Scraping**: BeautifulSoup4 & Requests
