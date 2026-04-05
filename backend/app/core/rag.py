@@ -1,16 +1,16 @@
 import os
-from openai import OpenAI
-import chromadb
+import re
 import traceback
+from openai import OpenAI
+from pinecone import Pinecone
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Initialize OpenRouter Client
-# We use OpenRouter's API URL. The key is in env vars (OPENROUTER_API_KEY)
+# ─── OpenRouter Client ───────────────────────────────────────────────────────
+
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# Initialize client lazily or with dummy key to prevent immediate crash on import if env var is missing (like in CI)
 try:
     if OPENROUTER_API_KEY:
         client = OpenAI(
@@ -18,103 +18,468 @@ try:
             api_key=OPENROUTER_API_KEY,
         )
     else:
-        # Placeholder for CI/CD import tests
         client = None
 except Exception as e:
     client = None
     print(f"Warning: Failed to initialize OpenAI client: {e}")
 
-# Initialize ChromaDB (Persistent)
-# Robust path handling matching ingest.py
-CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "chroma_db")
+# ─── Pinecone Client ─────────────────────────────────────────────────────────
 
-if not os.path.exists(CHROMA_DB_PATH):
-    pass # Chroma will create it if needed interaction happens
+from app.utils.pinecone import get_pinecone_client, get_pinecone_index
 
-chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-collection = chroma_client.get_or_create_collection(name="legal_cases")
+# Constants
+EMBED_MODEL = "llama-text-embed-v2"
+TOP_K = 50 # Increased for better recall
+SIMILARITY_THRESHOLD = 0.5  # Ignore anything below 50% match
+
+# Initializing Pinecone index
+# Initializing Pinecone index
+try:
+    index = get_pinecone_index()
+except Exception as e:
+    print(f"Warning: Failed to initialize Pinecone index: {e}")
+    index = None
+
+
+# ─── LLM Models (Free models fallback cascade) ───────────────────────────────
+
+MODELS = [
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "minimax/minimax-m2.5:free",
+    "stepfun/step-3.5-flash:free",
+    "arcee-ai/trinity-large-preview:free",
+    "liquid/lfm-2.5-1.2b-thinking:free",
+    "liquid/lfm-2.5-1.2b-instruct:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "arcee-ai/trinity-mini:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free"
+]
+
 
 def get_llm_response(prompt: str) -> str:
     if not client:
         return "Error: OpenRouter API configuration missing (Key not found)."
     
-    # Primary Model: Nvidia Nemotron
-    try:
-        response = client.chat.completions.create(
-            model="nvidia/nemotron-nano-12b-v2-vl:free", 
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"Warning: Nvidia Nemotron failed ({e}). Switching to Fallback (Gemini Flash)...")
-        # Fallback Model: Gemini Flash 2.0 (Experimental/Free)
+    last_error = None
+    for model_name in MODELS:
         try:
             response = client.chat.completions.create(
-                model="google/gemini-2.0-flash-exp:free",
+                model=model_name,
                 messages=[
                     {"role": "user", "content": prompt}
-                ]
+                ],
+                timeout=45.0  # Fails sequence to the next model if hanging > 45s
             )
             return response.choices[0].message.content
-        except Exception as fallback_error:
-             return f"Error from AI Provider (Primary & Fallback failed): {str(fallback_error)}"
+        except Exception as e:
+            last_error = e
+            print(f"Warning: Model {model_name} failed ({e}). Trying next fallback...")
+            continue
+            
+    return f"Error from AI Provider (All models failed). Last error: {str(last_error)}"
+
+
+def _assess_relevance(query: str, search_results: dict) -> bool:
+    """
+    Assesses if the search results contain any information relevant to the query.
+    Uses a 'Multi-Hit Verification' strategy: if the top 3 results don't clearly
+    address the query, we treat it as potentially irrelevant.
+    """
+    hits = search_results.get("matches", [])
+    if not hits:
+        return False
+
+    # Multi-Hit Verification: Check top 3 hits for a minimum threshold
+    top_hits = hits[:3]
+    max_score = max(hit.get("_score", 0) for hit in top_hits) # Changed from 'score' to '_score' for Pinecone
+    
+    # If the highest score is very low, it's definitely not relevant
+    if max_score < 0.25:
+        return False
+
+    # Use LLM for a nuanced relevance check on the top candidates
+    context_snippet = ""
+    for i, hit in enumerate(top_hits):
+        # Pinecone returns metadata in 'fields' for serverless, or 'metadata' for pod
+        meta = hit.get("fields", {}) or hit.get("metadata", {})
+        text = meta.get("text", "")[:300]
+        context_snippet += f"Result {i+1}:\n{text}\n---\n"
+
+    prompt = f"""
+    Query: {query}
+    
+    Search Results:
+    {context_snippet}
+    
+    Does any of the above search results contain information that could help answer the query?
+    Answer 'YES' if there is a potential match or 'NO' if it's completely irrelevant.
+    """
+    
+    try:
+        decision = get_llm_response(prompt).strip().upper()
+        return "YES" in decision
+    except Exception as e:
+        print(f"Error in LLM relevance assessment: {e}") # Changed from logger.error to print
+        # Fallback to score-based heuristic
+        return max_score > 0.35
+
+def _filter_diversity(hits: list, max_per_case: int = 2, min_cases: int = 3) -> list:
+    """
+    Filters hits to maintain diversity, preventing a single case from dominating the results.
+    - max_per_case: Max chunks to take from a single case.
+    - min_cases: Try to include at least this many distinct cases if available.
+    """
+    selected = []
+    seen_cases = {} # case_title -> count
+
+    for hit in hits:
+        # Pinecone returns metadata in 'fields' for serverless, or 'metadata' for pod
+        meta = hit.get("fields", {}) or hit.get("metadata", {})
+        title = meta.get("title", "Unknown Case").strip()
+        
+        # Count for this specific case
+        current_count = seen_cases.get(title, 0)
+        
+        # If we already have enough from this case AND we have reached our min_cases threshold, skip
+        if current_count >= max_per_case and len(seen_cases) >= min_cases:
+            continue
+        
+        selected.append(hit)
+        seen_cases[title] = current_count + 1
+        
+        # Stop if we have enough total context
+        if len(selected) >= 10:
+            break
+            
+    return selected
+
+
+def _detect_legal_domain(hits: list) -> str:
+    """
+    Looks at the top 3 hits and extracts the legal domain from metadata.
+    Returns 'Indian Law' as fallback.
+    """
+    if not hits:
+        return "Indian Law"
+        
+    domains = []
+    for hit in hits[:3]:
+        # Pinecone metadata format can vary slightly based on serverless vs pod
+        # Safely access metadata or fields
+        meta = {}
+        if isinstance(hit, dict):
+            meta = hit.get("metadata") or hit.get("fields", {})
+        elif hasattr(hit, "metadata"):
+            meta = hit.metadata
+            
+        if meta and isinstance(meta, dict):
+            domain = meta.get("legal_domain") or meta.get("ai_legal_domain")
+            if domain and domain.lower() not in {"general", "unknown"}:
+                domains.append(domain)
+            
+    if not domains:
+        return "Indian Law"
+        
+    # Return the most frequent domain
+    from collections import Counter
+    return Counter(domains).most_common(1)[0][0]
+
+
+def _extract_llm_cited_cases(analysis_text: str) -> list[str]:
+    """
+    Extract case names that the LLM cited in its generated text.
+    
+    When in general analysis mode, the LLM cites landmark cases from its
+    own knowledge (e.g. **R.G. Anand v. Deluxe Films (1978)**). We extract
+    these so the frontend can display them in the Precedent Database sidebar.
+    
+    Patterns matched:
+    - **Name v. Name (Year)**
+    - **Name vs. Name (Year)**
+    - **Name v. Name, Year**
+    """
+    # Match bold case citations: **Anything v/vs/v. Anything (Year)**
+    pattern = r'\*\*([^*]+?\s+v\.?s?\.?\s+[^*]+?\(\d{4}\))\*\*'
+    matches = re.findall(pattern, analysis_text)
+    
+    # Also match pattern without year in parens but with year after comma
+    pattern2 = r'\*\*([^*]+?\s+v\.?s?\.?\s+[^*]+?,\s*\d{4})\*\*'
+    matches2 = re.findall(pattern2, analysis_text)
+    
+    # Deduplicate while preserving order
+    seen = set()
+    result = []
+    for m in matches + matches2:
+        clean = m.strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            result.append(clean)
+    
+    return result
+
+
+def _verify_citations(analysis_text: str, retrieved_titles: list[str]) -> dict:
+    """
+    Post-generation citation verification.
+    
+    Cross-references case names mentioned in the LLM's response against
+    the titles of actually-retrieved documents. Flags any ungrounded
+    citations that the LLM may have hallucinated.
+    """
+    analysis_lower = analysis_text.lower()
+    
+    grounded = []      # Referenced in response AND retrieved from DB
+    ungrounded = []    # Retrieved from DB but NOT referenced in response
+    
+    for title in retrieved_titles:
+        title_lower = title.lower()
+        words = [w for w in title_lower.split() if len(w) > 3 and w not in ("the", "and", "vs.", "vs", "state", "union", "india")]
+        
+        match_count = sum(1 for w in words if w in analysis_lower)
+        match_ratio = match_count / max(len(words), 1)
+        
+        if match_ratio >= 0.4 or title_lower in analysis_lower:
+            grounded.append(title)
+        else:
+            ungrounded.append(title)
+    
+    return {
+        "grounded": grounded,
+        "ungrounded": ungrounded,
+        "confidence": "high" if len(grounded) > 0 else "low"
+    }
+
 
 def query_legal_assistant(user_query: str):
     """
-    Real RAG Construction - Hardened
+    RAG Pipeline with Pinecone Integrated Embeddings + Multi-Gate Relevance.
+    
+    1. Send the user's raw text query to Pinecone for integrated search.
+    2. Run 3-gate relevance assessment (absolute floor, score gap, LLM check).
+    3. If relevant context found, generate case-law-grounded analysis.
+    4. If context is IRRELEVANT, generate general legal analysis WITHOUT
+       forcing citations to unrelated cases — and signal the frontend.
     """
     context_text = ""
     cited_cases = []
+    cited_cases_details = []
+    search_results = None
+    has_relevant_context = False
     
-    # 1. Retrieve (Chroma handles embedding the query string automatically)
-    print(f"DEBUG: Starting retrieval for query: {user_query}")
+    # ── 1. Retrieve from Pinecone using Integrated Embeddings ──
+    print(f"\n{'='*60}")
+    print(f"DEBUG: Starting Pinecone search for query: {user_query}")
+    print(f"{'='*60}")
     try:
-        results = collection.query(
-            query_texts=[user_query],
-            n_results=3
+        search_results = index.search(
+            namespace="__default__",
+            query={
+                "top_k": TOP_K,
+                "inputs": {"text": user_query},
+                "filter": {"status": {"$eq": "active"}}
+            }
         )
-        print(f"DEBUG: Retrieval successful. Found {len(results['documents'][0])} docs.")
         
-        # Parse results
-        if results['documents']:
-            for i, doc in enumerate(results['documents'][0]):
-                meta = results['metadatas'][0][i]
-                title = meta.get('title', 'Unknown Case')
-                context_text += f"\nCase: {title}\nContent: {doc[:1000]}...\n"
-                cited_cases.append(title)
+        hits = []
+        if search_results and hasattr(search_results, 'result') and search_results.result.hits:
+            hits = search_results.result.hits
+        
+        print(f"DEBUG: Pinecone search returned {len(hits)} raw hits.")
+        for hit in hits:
+            score = hit.get("_score", 0)
+            # Pinecone returns metadata in 'fields' for serverless, or 'metadata' for pod
+            meta = hit.get("fields", {}) or hit.get("metadata", {})
+            title = meta.get("title", "Unknown")
+            print(f"  HIT: score={score:.4f}  title={title}")
+        
+        # ── 2. Multi-gate relevance assessment ──
+        # The new _assess_relevance expects the raw search_results dict, not just hits
+        is_relevant = _assess_relevance(user_query, search_results.result.to_dict()) # Pass the full result dict
+        print(f"DEBUG RELEVANCE DECISION: is_relevant={is_relevant}")
+        
+        if is_relevant and hits: # If LLM says relevant, proceed with filtering
+            has_relevant_context = True
+            
+            # Apply Diversity Filtering
+            selected_docs_raw = _filter_diversity(hits)
+
+            # Format context for LLM
+            context_text = ""
+            for doc_hit in selected_docs_raw:
+                # Pinecone returns metadata in 'fields' for serverless, or 'metadata' for pod
+                meta = doc_hit.get("fields", {}) or doc_hit.get("metadata", {})
+                title = meta.get("title", "Unknown Case")
+                text = meta.get("text", "")
+                score = doc_hit.get("_score", 0)
+
+                clean_title = title.strip()
+
+                domain = meta.get('ai_legal_domain', '')
+                judgment_date = meta.get('ai_judgment_date', '')
+                date_info = f" (Decided: {judgment_date})" if judgment_date and judgment_date != "UNKNOWN" else ""
+                domain_info = f" [{domain}]" if domain and domain != "General" else ""
+                
+                context_text += f"\nCase: {title}{date_info}{domain_info} [Relevance: {score:.2f}]\nContent: {text[:1500]}...\n"
+                
+                if clean_title and clean_title not in ('Unknown Case', 'UNKNOWN', 'Full Document') and not clean_title.startswith('['):
+                    if clean_title not in cited_cases:
+                        cited_cases.append(clean_title)
+                        snippet = text.strip()
+                        if len(snippet) > 400:
+                            snippet = snippet[:400] + "..."
+                        cited_cases_details.append({
+                            "title": clean_title,
+                            "url": meta.get('url', ''),
+                            "snippet": snippet
+                        })
                 
     except Exception as e:
         print(f"CRITICAL RETRIEVAL ERROR: {e}")
         traceback.print_exc()
-        # Fallback: Don't crash, just proceed without context
-        context_text = "Database retrieval temporarily unavailable. Proceeding with general legal knowledge."
+        context_text = ""
     
-    # Fallback if no context
-    if not context_text:
-        context_text = "No specific case law found in database. Answering based on general knowledge."
+    # ── 3. Detect domain from relevant hits only ──
+    detected_domain = "Indian Law"
+    try:
+        if has_relevant_context and search_results and hasattr(search_results, 'result') and search_results.result.hits:
+            detected_domain = _detect_legal_domain(search_results.result.hits)
+    except Exception:
+        pass
     
-    # 2. Generate
-    prompt = f"""
-    You are an expert Legal AI Assistant for Indian Copyright Law.
-    
-    Relevant Case Law Context:
-    {context_text}
-    
-    User Idea:
-    {user_query}
-    
-    Task:
-    Analyze the risk of copyright infringement. 
-    1. Assess the risk (High/Medium/Low).
-    2. Explain WHY based on the provided case law context (cite them).
-    3. Suggest specific modifications (Loopholes/Transformativeness) to reduce risk.
-    """
+    # ── 4. Generate with the right prompt based on relevance ──
+    if has_relevant_context and context_text:
+        prompt = _build_grounded_prompt(user_query, context_text, detected_domain)
+        relevance_quality = "high"
+        print(f"DEBUG: Using GROUNDED prompt with {len(cited_cases)} cited cases.")
+    else:
+        prompt = _build_general_prompt(user_query)
+        relevance_quality = "none"
+        print(f"DEBUG: Using GENERAL prompt (no relevant context).")
     
     analysis = get_llm_response(prompt)
     
+    # ── 5. Citation verification (only when we have context) ──
+    citation_check = _verify_citations(analysis, cited_cases) if cited_cases else {
+        "grounded": [],
+        "ungrounded": [],
+        "confidence": "general"
+    }
+    
+    # ── 6. Extract case names cited by LLM in its text ──
+    # This captures landmark cases the LLM references from its own knowledge
+    # (especially important in general analysis mode where cited_cases is empty)
+    llm_cited = _extract_llm_cited_cases(analysis)
+    
+    print(f"DEBUG: Response generated. relevance_quality={relevance_quality}, "
+          f"cited_cases={cited_cases}, llm_cited={llm_cited}")
+    print(f"{'='*60}\n")
+    
     return {
         "analysis": analysis,
-        "cited_cases": cited_cases if cited_cases else ["General Legal Principles"]
+        "cited_cases": cited_cases if cited_cases else ["General Legal Principles"],
+        "cited_cases_details": cited_cases_details,
+        "citation_verification": citation_check,
+        "relevance_quality": relevance_quality,
+        "llm_cited_cases": llm_cited,
     }
+
+
+def _build_grounded_prompt(user_query: str, context_text: str, detected_domain: str) -> str:
+    """
+    Prompt used when the retrieval step found genuinely relevant cases.
+    Instructs the LLM to cite them — but only the ones that are actually applicable.
+    """
+    return f"""You are an expert Legal AI Assistant specializing in {detected_domain} under Indian jurisdiction.
+
+Relevant Case Law Context (from verified legal database):
+{context_text}
+
+User Query:
+{user_query}
+
+INSTRUCTIONS:
+Structure your response using these markdown sections. Write concisely — be dense with information, not verbose.
+
+## Risk Assessment
+
+State the risk level as **High**, **Medium**, or **Low** in bold, then give a concise 2-3 sentence explanation of the overall legal risk.
+
+## Detailed Analysis
+
+Analyse the legal issues as flowing prose. For each relevant case from the context:
+- Bold the case name (e.g. **Smith v. Jones (2021)**)
+- Explain its relevance in 2-3 sentences inline
+- Cite specific statutes and sections (e.g. Section 52(1)(a) of the Copyright Act, 1957)
+
+Cite only the cases from the context that are genuinely relevant to the user's query. If a case in the context is not relevant, DO NOT cite it just to pad the answer.
+
+Use paragraphs, bullet points, and numbered lists. Group related issues under ### subheadings when it improves clarity.
+
+## Legal Loopholes & Exceptions
+
+Identify any potential loopholes, exceptions, or alternative legal interpretations based on the context provided. Explain how they might apply.
+
+## Recommendations
+
+Numbered, actionable strategies to mitigate risk:
+1. First recommendation with specific legal basis
+2. Second recommendation
+3. Third recommendation (and so on)
+
+FORMATTING RULES:
+- NEVER use markdown tables (pipes |). Use structured prose, bullet points, and subheadings instead.
+- ONLY cite cases that appear in the context above AND are genuinely relevant — do NOT fabricate case names.
+- If a case from the context is unrelated to the user's question, simply ignore it.
+- Use ## for sections, ### for subsections, **bold** for case names and risk levels.
+- Keep your response concise and information-dense. Avoid filler sentences.
+"""
+
+
+def _build_general_prompt(user_query: str) -> str:
+    """
+    Prompt used when no relevant case law was found in the database.
+    Instructs the LLM to answer with general legal knowledge transparently.
+    """
+    return f"""You are an expert Legal AI Assistant specializing in Indian Law.
+
+User Query:
+{user_query}
+
+IMPORTANT CONTEXT:
+Our legal precedent database was searched but did NOT contain case law directly relevant to this specific query. You must answer based on your general legal knowledge of Indian law.
+
+INSTRUCTIONS:
+Structure your response using these markdown sections. Write concisely — be dense with information, not verbose.
+
+## Risk Assessment
+
+State the risk level as **High**, **Medium**, or **Low** in bold, then give a concise 2-3 sentence explanation of the overall legal risk.
+
+## Detailed Analysis
+
+Analyse the legal issues as flowing prose using your general knowledge of Indian law.
+- Cite specific statutes and sections (e.g. Section 52(1)(a) of the Copyright Act, 1957)
+- Refer to well-known landmark cases that you are confident actually exist
+- Bold all case names (e.g. **Kesavananda Bharati v. State of Kerala (1973)**)
+
+CRITICAL: Only cite cases you are highly confident are real. Do NOT fabricate case names. It is better to cite a statute than a dubious case name.
+
+Use paragraphs, bullet points, and numbered lists. Group related issues under ### subheadings when it improves clarity.
+
+## Legal Loopholes & Exceptions
+
+Identify any potential loopholes, exceptions, or alternative legal interpretations. Explain how they might apply.
+
+## Recommendations
+
+Numbered, actionable strategies to mitigate risk:
+1. First recommendation with specific legal basis
+2. Second recommendation
+3. Third recommendation (and so on)
+
+FORMATTING RULES:
+- NEVER use markdown tables (pipes |). Use structured prose, bullet points, and subheadings instead.
+- Use ## for sections, ### for subsections, **bold** for case names and risk levels.
+- Keep your response concise and information-dense. Avoid filler sentences.
+"""

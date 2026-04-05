@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 interface TypewriterProps {
     text: string;
@@ -10,37 +10,53 @@ interface TypewriterProps {
     children: (text: string) => React.ReactNode;
 }
 
+/**
+ * Line-aware Typewriter
+ * 
+ * Instead of revealing character-by-character (which breaks markdown table
+ * parsing mid-row), this component reveals text LINE-BY-LINE.  Each line
+ * is appended whole, so markdown pipe-tables, headings, and list items
+ * are always parseable at every intermediate render frame.
+ * 
+ * For very short text (<200 chars), it falls back to instant reveal.
+ */
 export function Typewriter({
     text,
-    speed = 5,
+    speed = 20,
     onComplete,
     children
 }: TypewriterProps) {
-    const [displayedText, setDisplayedText] = useState("");
-    const [currentIndex, setCurrentIndex] = useState(0);
+    const [displayedLines, setDisplayedLines] = useState(0);
 
+    // Split text into lines, preserving empty lines for paragraph breaks
+    const lines = text.split("\n");
+    const totalLines = lines.length;
+
+    // Reset when text changes (new analysis)
     useEffect(() => {
-        // Reset if text changes completely (new analysis)
-        if (text !== displayedText && currentIndex === 0) {
-            setDisplayedText("");
-        }
+        setDisplayedLines(0);
     }, [text]);
 
     useEffect(() => {
-        if (currentIndex < text.length) {
+        // For very short text, show immediately
+        if (text.length < 200) {
+            setDisplayedLines(totalLines);
+            if (onComplete) onComplete();
+            return;
+        }
+
+        if (displayedLines < totalLines) {
             const timeout = setTimeout(() => {
-                setDisplayedText((prev) => prev + text[currentIndex]);
-                setCurrentIndex((prev) => prev + 1);
+                setDisplayedLines((prev) => prev + 1);
             }, speed);
 
             return () => clearTimeout(timeout);
         } else if (onComplete) {
             onComplete();
         }
-    }, [currentIndex, text, speed, onComplete]);
+    }, [displayedLines, totalLines, text, speed, onComplete]);
 
-    // If text is extremely long, we might want to chunk it to avoid thousands of re-renders
-    // For now, character-by-character is standard typewriting.
+    const visibleText = lines.slice(0, displayedLines).join("\n");
 
-    return <>{children(displayedText)}</>;
+    return <>{children(visibleText)}</>;
 }
