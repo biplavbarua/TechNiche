@@ -186,26 +186,24 @@ def resolve_legal_conflicts(new_metadata: dict, index=None):
             )
         
         # ── Step 3: Mark as overruled with provenance ──
+        # Use direct set_metadata update — no fetch+merge needed for serverless.
+        # Pinecone's update() merges only the specified keys, preserving the rest.
         ids_to_update = [hit["_id"] for hit in results]
-        
+
         for record_id in ids_to_update:
             try:
-                # Fetch current metadata, update it, and upsert back
-                fetch_result = index.fetch(ids=[record_id])
-                if fetch_result and fetch_result.vectors and record_id in fetch_result.vectors:
-                    vec = fetch_result.vectors[record_id]
-                    updated_meta = {**vec.metadata}
-                    updated_meta["status"] = "overruled"
-                    updated_meta["overruled_by"] = new_case_title
-                    updated_meta["overruled_on"] = new_case_date.isoformat() if new_case_date else "UNKNOWN"
-                    
-                    index.update(
-                        id=record_id,
-                        set_metadata=updated_meta
-                    )
+                index.update(
+                    id=record_id,
+                    set_metadata={
+                        "status": "overruled",
+                        "overruled_by": new_case_title,
+                        "overruled_on": new_case_date.isoformat() if new_case_date else "UNKNOWN",
+                    },
+                    namespace="__default__"
+                )
             except Exception as e:
-                logger.error(f"Failed to update record {record_id}: {e}")
-                
+                logger.error(f"Failed to mark record {record_id} as overruled: {e}")
+
         logger.info(
             f"TEMPORAL CONFLICT RESOLVED: Marked {len(ids_to_update)} chunks of "
             f"'{case_name}' as 'overruled' by '{new_case_title}'."
@@ -213,7 +211,10 @@ def resolve_legal_conflicts(new_metadata: dict, index=None):
 
 
 def _find_case_in_db(case_name: str) -> list | None:
-    """Semantic search to find a case by name in Pinecone using Integrated Embeddings."""
+    """
+    Semantic search to find a case by name in Pinecone using Integrated Embeddings.
+    Uses the serverless result.hits format (not the legacy Pod 'matches' key).
+    """
     try:
         index = get_pinecone_index()
         search_results = index.search(
@@ -224,21 +225,21 @@ def _find_case_in_db(case_name: str) -> list | None:
                 "filter": {"status": {"$eq": "active"}}
             }
         )
-        # Pinecone's new search API returns results under the 'matches' key directly
-        # The old API returned them under search_results.result.hits
-        matches = search_results.get("matches", [])
-        if not matches and hasattr(search_results, 'result') and hasattr(search_results.result, 'hits'):
-            matches = search_results.result.hits
+
+        # Serverless Pinecone returns hits under result.hits, not 'matches'
+        hits = []
+        if hasattr(search_results, 'result') and search_results.result and hasattr(search_results.result, 'hits'):
+            hits = search_results.result.hits or []
 
         # Only return high-confidence matches (score > 0.7)
         confident_matches = [
-            {"_id": m["_id"], "metadata": m.get("fields", {})}
-            for m in matches if m.get("_score", 0) > 0.7
+            {"_id": hit.get("_id"), "metadata": hit.get("fields", {})}
+            for hit in hits if hit.get("_score", 0) > 0.7
         ]
         return confident_matches if confident_matches else None
     except Exception as e:
-        logger.error(f"Semantic search fallback failed for '{case_name}': {e}")
-    
+        logger.error(f"Semantic search failed for '{case_name}': {e}")
+
     return None
 
 
@@ -256,23 +257,35 @@ def process_and_store_document(text: str, metadata: dict, doc_id: str = None):
         index = get_pinecone_index()
         
         # ── Step 1: Legal extraction & Enrichment ──
-        # Uses GPT-4o to identify case name, date, and overrule/uphold relationships.
+        # Pydantic-validated structured extraction of case name, date, domain,
+        # and overruled/upheld relationships before any data enters the DB.
         ai_metadata = extract_legal_metadata(text)
-        
-        if ai_metadata:
-            metadata["ai_case_name"] = ai_metadata.get("case_name", "UNKNOWN")
-            metadata["ai_judgment_date"] = ai_metadata.get("judgment_date", "UNKNOWN")
-            metadata["ai_overrules_cases"] = ", ".join(ai_metadata.get("overrules_cases", []))
-            metadata["ai_upholds_cases"] = ", ".join(ai_metadata.get("upholds_cases", []))
-            metadata["ai_legal_domain"] = ai_metadata.get("legal_domain", "General")
-            
-            # Store validated date as ISO string for Pinecone compatibility
-            validated_date = ai_metadata.get("validated_date")
-            if validated_date:
-                metadata["ai_validated_date"] = validated_date.isoformat() if hasattr(validated_date, 'isoformat') else str(validated_date)
 
-            # Temporal conflict resolution (now with actual date comparison)
-            resolve_legal_conflicts(metadata)
+        # FIX 4 — Abort guard: if extraction fails, do NOT store unvalidated data.
+        # Storing chunks with blank metadata silently pollutes the DB with unjoinable
+        # records that can never be correctly cited or temporally resolved.
+        if not ai_metadata:
+            logger.warning(
+                f"Extraction returned no metadata for '{metadata.get('title', 'Untitled')}'. "
+                f"Aborting ingestion to prevent unvalidated data entering the DB."
+            )
+            return False
+
+        metadata["ai_case_name"] = ai_metadata.get("case_name", "UNKNOWN")
+        metadata["ai_judgment_date"] = ai_metadata.get("judgment_date", "UNKNOWN")
+        metadata["ai_overrules_cases"] = ", ".join(ai_metadata.get("overrules_cases", []))
+        metadata["ai_upholds_cases"] = ", ".join(ai_metadata.get("upholds_cases", []))
+        metadata["ai_legal_domain"] = ai_metadata.get("legal_domain", "General")
+
+        # Store validated date as ISO string for Pinecone compatibility
+        validated_date = ai_metadata.get("validated_date")
+        if validated_date:
+            metadata["ai_validated_date"] = (
+                validated_date.isoformat() if hasattr(validated_date, 'isoformat') else str(validated_date)
+            )
+
+        # Temporal conflict resolution (now with actual date comparison)
+        resolve_legal_conflicts(metadata)
 
         # ── Sliding-window chunking (replaces text[:9000] truncation) ──
         chunks = chunk_text(text)

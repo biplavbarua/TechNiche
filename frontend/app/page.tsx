@@ -304,6 +304,40 @@ export default function Home() {
                   )}
                 </div>
 
+                {/* Citation Confidence Badge — Fix 3 */}
+                {result.citation_verification && result.citation_verification.confidence !== "general" && (
+                  <div className="mt-6 pt-4 border-t border-slate-100">
+                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                      <Search className="w-3.5 h-3.5" />
+                      Citation Confidence
+                    </h4>
+                    <div className={`p-4 rounded-none border text-xs font-semibold leading-relaxed ${
+                      result.citation_verification.ungrounded.length === 0
+                        ? "bg-green-50 border-green-200 text-green-800"
+                        : result.citation_verification.grounded.length > 0
+                        ? "bg-amber-50 border-amber-200 text-amber-800"
+                        : "bg-red-50 border-red-200 text-red-800"
+                    }`}>
+                      <div className="flex items-center gap-2 mb-2 font-black uppercase tracking-wider text-[0.65rem]">
+                        {result.citation_verification.ungrounded.length === 0
+                          ? "✓ All Citations Verified"
+                          : result.citation_verification.correction_applied
+                          ? "⚡ Auto-Corrected"
+                          : "⚠ Partial Verification"}
+                      </div>
+                      <p>
+                        <span className="font-bold">{result.citation_verification.grounded.length}</span> grounded
+                        {result.citation_verification.ungrounded.length > 0 && (
+                          <> · <span className="font-bold">{result.citation_verification.ungrounded.length}</span> unverified</>
+                        )}
+                        {result.citation_verification.correction_applied && (
+                          <> · hallucinated references removed automatically</>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="mt-8 pt-6 border-t border-slate-200">
                   <h3 className="text-xs font-black uppercase tracking-widest mb-3 flex items-center gap-2 text-slate-600">
                     <AlertTriangle className="w-4 h-4 text-orange-500" />

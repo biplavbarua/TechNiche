@@ -8,6 +8,12 @@ export interface AnalysisResult {
     }[];
     relevance_quality?: "high" | "low" | "none";
     llm_cited_cases?: string[];
+    citation_verification?: {
+        grounded: string[];
+        ungrounded: string[];
+        confidence: "high" | "low" | "general";
+        correction_applied?: boolean;
+    };
 }
 
 export interface CrawlResult {
