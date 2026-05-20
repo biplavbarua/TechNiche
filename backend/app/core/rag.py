@@ -1,5 +1,6 @@
 import os
 import re
+import difflib
 import traceback
 from openai import OpenAI
 from pinecone import Pinecone
@@ -219,35 +220,76 @@ def _extract_llm_cited_cases(analysis_text: str) -> list[str]:
     return result
 
 
+# Legal stopwords excluded from word-bag matching (appear in almost every case name)
+_LEGAL_STOPWORDS = {
+    "the", "and", "vs", "vs.", "v.", "v", "state", "union",
+    "india", "of", "in", "re", "ors", "anr", "another"
+}
+
+
 def _verify_citations(analysis_text: str, retrieved_titles: list[str]) -> dict:
     """
-    Post-generation citation verification.
-    
-    Cross-references case names mentioned in the LLM's response against
-    the titles of actually-retrieved documents. Flags any ungrounded
-    citations that the LLM may have hallucinated.
+    Post-generation citation verification — FIX 5: uses difflib.SequenceMatcher
+    in addition to word-bag matching to catch partial/abbreviated case name matches.
+
+    A title is 'grounded' if:
+      - It appears verbatim (case-insensitive) in the analysis, OR
+      - >= 65% of its significant words appear AND the overall sequence
+        similarity of title vs. any 120-char window of the analysis is >= 0.55.
+
+    Anything else is flagged as 'ungrounded' — the LLM may have hallucinated it.
     """
     analysis_lower = analysis_text.lower()
-    
-    grounded = []      # Referenced in response AND retrieved from DB
-    ungrounded = []    # Retrieved from DB but NOT referenced in response
-    
+
+    grounded = []   # Retrieved AND referenced in the response
+    ungrounded = [] # Retrieved but NOT referenced — possible hallucination
+
     for title in retrieved_titles:
         title_lower = title.lower()
-        words = [w for w in title_lower.split() if len(w) > 3 and w not in ("the", "and", "vs.", "vs", "state", "union", "india")]
-        
-        match_count = sum(1 for w in words if w in analysis_lower)
-        match_ratio = match_count / max(len(words), 1)
-        
-        if match_ratio >= 0.4 or title_lower in analysis_lower:
+
+        # Fast path: verbatim substring match
+        if title_lower in analysis_lower:
+            grounded.append(title)
+            continue
+
+        # Significant-word filter (strip stopwords and short tokens)
+        sig_words = [
+            w for w in title_lower.split()
+            if len(w) > 3 and w not in _LEGAL_STOPWORDS
+        ]
+
+        if not sig_words:
+            # Degenerate title — can't verify, mark ungrounded to be safe
+            ungrounded.append(title)
+            continue
+
+        word_hits = sum(1 for w in sig_words if w in analysis_lower)
+        word_ratio = word_hits / len(sig_words)
+
+        # SequenceMatcher check: slide a window across the first 6000 chars
+        # to catch abbreviated/reordered citations (e.g. "Vishaka case" for
+        # "Vishaka v. State of Rajasthan") even when word_ratio is low.
+        seq_matched = False
+        window = len(title_lower) + 20
+        for i in range(0, min(len(analysis_lower), 6000) - window + 1, 15):
+            ratio = difflib.SequenceMatcher(
+                None, title_lower, analysis_lower[i:i + window]
+            ).ratio()
+            if ratio >= 0.55:
+                seq_matched = True
+                break
+
+        # 0.4 word-ratio threshold preserves the original detection contract;
+        # SequenceMatcher picks up additional abbreviation/reorder matches.
+        if word_ratio >= 0.4 or seq_matched:
             grounded.append(title)
         else:
             ungrounded.append(title)
-    
+
     return {
         "grounded": grounded,
         "ungrounded": ungrounded,
-        "confidence": "high" if len(grounded) > 0 else "low"
+        "confidence": "high" if grounded else "low",
     }
 
 
@@ -358,14 +400,46 @@ def query_legal_assistant(user_query: str):
         print(f"DEBUG: Using GENERAL prompt (no relevant context).")
     
     analysis = get_llm_response(prompt)
-    
+
     # ── 5. Citation verification (only when we have context) ──
     citation_check = _verify_citations(analysis, cited_cases) if cited_cases else {
         "grounded": [],
         "ungrounded": [],
         "confidence": "general"
     }
-    
+
+    # ── 5b. FIX 2: Deterministic Citation Correction Pass ──────────────────────
+    # If the LLM cited cases that were NOT in the retrieved documents, run a
+    # targeted correction prompt to strip the hallucinated references.
+    # This makes citation bounding *enforceable*, not just diagnostic.
+    if citation_check.get("ungrounded") and has_relevant_context:
+        ungrounded_list = "\n".join(
+            f"  - {c}" for c in citation_check["ungrounded"]
+        )
+        correction_prompt = f"""The following legal analysis contains citations to cases that were NOT \
+found in the retrieved evidence base and may be hallucinated:
+
+UNVERIFIED CITATIONS TO REMOVE:
+{ungrounded_list}
+
+Rewrite the analysis below, removing any references to the above unverified cases. \
+Replace them with the directly retrieved cases already cited, or with specific statutory \
+principles (e.g. Section X of Act Y). Preserve all section headings, risk levels, \
+recommendations, and all other verified content exactly.
+
+ORIGINAL ANALYSIS:
+{analysis}"""
+        corrected = get_llm_response(correction_prompt)
+        if corrected and not corrected.startswith("Error"):
+            analysis = corrected
+            # Re-verify after correction to update grounded/ungrounded counts
+            citation_check = _verify_citations(analysis, cited_cases)
+            citation_check["correction_applied"] = True
+            print(
+                f"DEBUG: Citation correction pass applied. "
+                f"Removed hallucinated references: {citation_check.get('ungrounded', [])}"
+            )
+
     # ── 6. Extract case names cited by LLM in its text ──
     # This captures landmark cases the LLM references from its own knowledge
     # (especially important in general analysis mode where cited_cases is empty)
