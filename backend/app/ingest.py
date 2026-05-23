@@ -70,23 +70,11 @@ def generate_deterministic_id(text: str, chunk_index: int = 0) -> str:
 
 
 def is_pinecone_available() -> bool:
-    """Verifies Pinecone connection by attempting to list or search."""
+    """Verifies Pinecone connection by checking index stats."""
     try:
         index = get_pinecone_index()
-        # Attempt a minimal search or list operation
-        results = index.list(prefix=None, limit=1)
-        if results:
-            return True
-        search_results = index.search(
-            namespace="__default__",
-            query={
-                "top_k": 1,
-                "inputs": {"text": "test query"},
-            },
-            model=EMBED_MODEL,
-        )
-        if search_results:
-            return True
+        stats = index.describe_index_stats()
+        return stats is not None
     except Exception as e:
         logger.error(f"Pinecone availability check failed: {e}")
     return False
@@ -100,19 +88,23 @@ def is_url_already_ingested(url: str) -> bool:
     repeated /api/learn/url calls would store the same case N times.
     """
     try:
+        from app.utils.pinecone import get_pinecone_client
         index = get_pinecone_index()
-        # Pinecone doesn't support direct metadata-only filtering on list,
-        # so we do a dummy search with a filter instead.
-        search_results = index.search(
-            namespace="__default__",
-            query={
-                "top_k": 1,
-                "inputs": {"text": url},
-                "filter": {"url": {"$eq": url}}
-            },
+        pc = get_pinecone_client()
+        # Generate a dummy embedding from the URL text to use with query()
+        embeddings = pc.inference.embed(
             model=EMBED_MODEL,
+            inputs=[url],
+            parameters={"input_type": "query"}
         )
-        if search_results and hasattr(search_results, 'result') and search_results.result.hits:
+        search_results = index.query(
+            namespace="__default__",
+            vector=embeddings[0].values,
+            top_k=1,
+            filter={"url": {"$eq": url}},
+            include_metadata=True,
+        )
+        if search_results and search_results.matches:
             return True
     except Exception as e:
         logger.debug(f"URL dedup check failed (non-critical): {e}")
@@ -212,29 +204,32 @@ def resolve_legal_conflicts(new_metadata: dict, index=None):
 
 def _find_case_in_db(case_name: str) -> list | None:
     """
-    Semantic search to find a case by name in Pinecone using Integrated Embeddings.
-    Uses the serverless result.hits format (not the legacy Pod 'matches' key).
+    Semantic search to find a case by name in Pinecone using explicit embeddings.
     """
     try:
+        from app.utils.pinecone import get_pinecone_client
         index = get_pinecone_index()
-        search_results = index.search(
-            namespace="__default__",
-            query={
-                "top_k": 5,
-                "inputs": {"text": case_name},
-                "filter": {"status": {"$eq": "active"}}
-            }
+        pc = get_pinecone_client()
+
+        embeddings = pc.inference.embed(
+            model=EMBED_MODEL,
+            inputs=[case_name],
+            parameters={"input_type": "query"}
         )
 
-        # Serverless Pinecone returns hits under result.hits, not 'matches'
-        hits = []
-        if hasattr(search_results, 'result') and search_results.result and hasattr(search_results.result, 'hits'):
-            hits = search_results.result.hits or []
+        search_results = index.query(
+            namespace="__default__",
+            vector=embeddings[0].values,
+            top_k=5,
+            filter={"status": {"$eq": "active"}},
+            include_metadata=True,
+        )
 
         # Only return high-confidence matches (score > 0.7)
         confident_matches = [
-            {"_id": hit.get("_id"), "metadata": hit.get("fields", {})}
-            for hit in hits if hit.get("_score", 0) > 0.7
+            {"_id": match.id, "metadata": match.metadata or {}}
+            for match in (search_results.matches or [])
+            if match.score > 0.7
         ]
         return confident_matches if confident_matches else None
     except Exception as e:
@@ -294,26 +289,51 @@ def process_and_store_document(text: str, metadata: dict, doc_id: str = None):
             logger.warning(f"No valid chunks produced for document: {metadata.get('title', 'Untitled')}")
             return False
         
-        # ── Upsert chunks to Pinecone using Integrated Embeddings ──
+        # ── Upsert chunks to Pinecone with externally generated embeddings ──
+        # We generate embeddings via pc.inference.embed() (same as the query path
+        # in rag.py) and then use index.upsert() — this works regardless of whether
+        # the index has Integrated Inference configured.
+        from app.utils.pinecone import get_pinecone_client
+        pc = get_pinecone_client()
+
         records = []
         for i, chunk in enumerate(chunks):
             chunk_id = doc_id if (doc_id and i == 0) else generate_deterministic_id(chunk, i)
-            
-            # Each chunk inherits parent metadata + chunk index
             chunk_metadata = {**metadata, "chunk_index": i, "total_chunks": len(chunks)}
-            
             records.append({
                 "_id": chunk_id,
-                "text": chunk,  # Pinecone Integrated Embeddings reads from the "text" field
+                "text": chunk,
                 **chunk_metadata,
             })
-        
-        # Upsert in batches of 96 (Pinecone's recommended batch size for integrated embeddings)
+
         BATCH_SIZE = 96
         stored_count = 0
         for batch_start in range(0, len(records), BATCH_SIZE):
             batch = records[batch_start:batch_start + BATCH_SIZE]
-            index.upsert_records(namespace="__default__", records=batch)
+
+            # Extract text for embedding
+            texts = [rec["text"] for rec in batch]
+            
+            # Generate embeddings externally
+            embeddings = pc.inference.embed(
+                model=EMBED_MODEL,
+                inputs=texts,
+                parameters={"input_type": "passage"}
+            )
+
+            # Build upsert vectors
+            vectors = []
+            for i, rec in enumerate(batch):
+                vec_id = rec["_id"]
+                # Build clean metadata dict (exclude _id, keep text for retrieval)
+                meta = {k: v for k, v in rec.items() if k != "_id"}
+                vectors.append({
+                    "id": vec_id,
+                    "values": embeddings[i].values,
+                    "metadata": meta,
+                })
+
+            index.upsert(vectors=vectors, namespace="__default__")
             stored_count += len(batch)
         
         source = metadata.get('url', 'Unknown Source')
