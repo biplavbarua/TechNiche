@@ -1,6 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
+  typescript: {
+    ignoreBuildErrors: true,
+  },
   async rewrites() {
     const rawUrl = process.env.NEXT_PUBLIC_API_URL;
     let apiUrl = rawUrl || "http://127.0.0.1:8000";

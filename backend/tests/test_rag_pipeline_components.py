@@ -287,13 +287,22 @@ class TestQueryLegalAssistantIntegration:
     """Integration tests for the query_legal_assistant function."""
 
     @patch("app.core.rag.index")
+    @patch("app.core.rag.get_pinecone_client")
     @patch("app.core.rag.get_llm_response")
-    def test_no_relevant_context_uses_general_prompt(self, mock_llm, mock_index):
+    def test_no_relevant_context_uses_general_prompt(self, mock_llm, mock_get_pc, mock_index):
         """Test that irrelevant context triggers general prompt."""
+        mock_pc = MagicMock()
+        
+        # Mock embeddings
+        mock_embedding = MagicMock()
+        mock_embedding.values = [0.1, 0.2, 0.3]
+        mock_pc.inference.embed.return_value = [mock_embedding]
+        mock_get_pc.return_value = mock_pc
+        
         # Mock search results with low relevance
         mock_search_result = MagicMock()
-        mock_search_result.result.hits = []  # No hits
-        mock_index.search.return_value = mock_search_result
+        mock_search_result.matches = []  # No hits
+        mock_index.query.return_value = mock_search_result
         
         mock_llm.return_value = "General legal analysis"
         
@@ -306,22 +315,39 @@ class TestQueryLegalAssistantIntegration:
         mock_llm.assert_called_once()
 
     @patch("app.core.rag.index")
+    @patch("app.core.rag.get_pinecone_client")
     @patch("app.core.rag.get_llm_response")
-    def test_relevant_context_uses_grounded_prompt(self, mock_llm, mock_index):
+    def test_relevant_context_uses_grounded_prompt(self, mock_llm, mock_get_pc, mock_index):
         """Test that relevant context triggers grounded prompt."""
+        mock_pc = MagicMock()
+        
+        # Mock embeddings
+        mock_embedding = MagicMock()
+        mock_embedding.values = [0.1, 0.2, 0.3]
+        mock_pc.inference.embed.return_value = [mock_embedding]
+        mock_get_pc.return_value = mock_pc
+
         mock_hit = {
-            "_score": 0.8,
-            "fields": {
+            "score": 0.8,
+            "metadata": {
                 "title": "Test Case vs. State",
                 "text": "This is the case text",
                 "url": "https://example.com/case"
             }
         }
         
+        # Convert dictionary to object with properties so getattr works
+        mock_hit_obj = MagicMock()
+        mock_hit_obj.score = 0.8
+        mock_hit_obj.metadata = {
+            "title": "Test Case vs. State",
+            "text": "This is the case text",
+            "url": "https://example.com/case"
+        }
+        
         mock_search_result = MagicMock()
-        mock_search_result.result.hits = [mock_hit]
-        mock_search_result.result.to_dict.return_value = {"matches": [mock_hit]}
-        mock_index.search.return_value = mock_search_result
+        mock_search_result.matches = [mock_hit_obj]
+        mock_index.query.return_value = mock_search_result
         
         # Mock relevance assessment to return True
         with patch('app.core.rag._assess_relevance', return_value=True):
@@ -336,13 +362,22 @@ class TestQueryLegalAssistantIntegration:
             assert len(result["llm_cited_cases"]) == 0  # No general case citations
 
     @patch("app.core.rag.index")
+    @patch("app.core.rag.get_pinecone_client")
     @patch("app.core.rag.get_llm_response")
-    def test_extracts_llm_cited_cases_from_knowledge(self, mock_llm, mock_index):
+    def test_extracts_llm_cited_cases_from_knowledge(self, mock_llm, mock_get_pc, mock_index):
         """Test that LLM-cited cases from general knowledge are extracted."""
+        mock_pc = MagicMock()
+        
+        # Mock embeddings
+        mock_embedding = MagicMock()
+        mock_embedding.values = [0.1, 0.2, 0.3]
+        mock_pc.inference.embed.return_value = [mock_embedding]
+        mock_get_pc.return_value = mock_pc
+        
         # Mock search results but make them irrelevant
         mock_search_result = MagicMock()
-        mock_search_result.result.hits = []
-        mock_index.search.return_value = mock_search_result
+        mock_search_result.matches = []
+        mock_index.query.return_value = mock_search_result
         
         # Mock relevance assessment to return False (irrelevant)
         with patch('app.core.rag._assess_relevance', return_value=False):
