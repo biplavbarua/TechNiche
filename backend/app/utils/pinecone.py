@@ -22,6 +22,6 @@ def get_pinecone_index():
     pc = get_pinecone_client()
     index_name = os.getenv("PINECONE_INDEX_NAME")
     if not index_name:
-        # Fallback to a default if not set, though it should be in .env
-        index_name = "techniche-legal-index"
+        # Fallback to match the render.yaml default
+        index_name = "indian-law"
     return pc.Index(index_name)

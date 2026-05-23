@@ -7,6 +7,11 @@
   --foreground: #0f172a;
 }
 
+.dark {
+  --background: #020617;
+  --foreground: #e2e8f0;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -35,6 +40,10 @@ body {
   color: #0f172a;
   text-transform: uppercase;
 }
+.dark .legal-prose h2 {
+  border-bottom-color: #334155;
+  color: #f1f5f9;
+}
 
 .legal-prose h2:first-child {
   margin-top: 0;
@@ -48,6 +57,9 @@ body {
   color: #1e293b;
   letter-spacing: -0.01em;
 }
+.dark .legal-prose h3 {
+  color: #e2e8f0;
+}
 
 .legal-prose p {
   margin-bottom: 1.25rem;
@@ -55,12 +67,19 @@ body {
   font-size: 1rem;
   color: #334155;
 }
+.dark .legal-prose p {
+  color: #cbd5e1;
+}
 
 .legal-prose ol,
 .legal-prose ul {
   padding-left: 1.5rem;
   margin-bottom: 1.25rem;
   color: #334155;
+}
+.dark .legal-prose ol,
+.dark .legal-prose ul {
+  color: #cbd5e1;
 }
 
 .legal-prose ol { list-style: decimal; }
@@ -92,11 +111,19 @@ body {
   transition: all 0.2s ease;
   border-top: 4px solid #2563eb;
 }
+.dark .analysis-card {
+  border-color: #334155;
+  background: #0f172a;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
 
 .analysis-card:hover {
   box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
   transform: translateY(-2px);
   border-top-color: #1d4ed8;
+}
+.dark .analysis-card:hover {
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.4);
 }
 
 .analysis-card-field {
@@ -116,12 +143,18 @@ body {
   margin-bottom: 0.35rem;
   display: block;
 }
+.dark .analysis-card-label {
+  color: #94a3b8;
+}
 
 .analysis-card-value {
   font-size: 1rem;
   line-height: 1.6;
   color: #0f172a;
   font-weight: 500;
+}
+.dark .analysis-card-value {
+  color: #e2e8f0;
 }
 
 /* ── Enterprise Risk Badges ── */
@@ -141,6 +174,10 @@ body {
 .risk-medium { background: #fffbeb; color: #b45309; border-color: #fcd34d; }
 .risk-low { background: #f0fdf4; color: #15803d; border-color: #86efac; }
 
+.dark .risk-high { background: rgba(127, 29, 29, 0.3); color: #fca5a5; border-color: rgba(127, 29, 29, 0.5); }
+.dark .risk-medium { background: rgba(120, 53, 15, 0.3); color: #fcd34d; border-color: rgba(120, 53, 15, 0.5); }
+.dark .risk-low { background: rgba(20, 83, 45, 0.3); color: #86efac; border-color: rgba(20, 83, 45, 0.5); }
+
 /* ── Inline Code ── */
 .legal-prose code {
   background: #f1f5f9;
@@ -151,6 +188,11 @@ body {
   font-size: 0.85em;
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-weight: 700;
+}
+.dark .legal-prose code {
+  background: #1e293b;
+  color: #e2e8f0;
+  border-color: #475569;
 }
 
 /* ── Blockquote ── */
@@ -163,6 +205,10 @@ body {
   color: #1e3a8a;
   font-weight: 500;
 }
+.dark .legal-prose blockquote {
+  background: rgba(30, 58, 138, 0.15);
+  color: #93c5fd;
+}
 
 /* ── Horizontal Rule ── */
 .legal-prose hr {
@@ -170,6 +216,9 @@ body {
   height: 2px;
   background: #cbd5e1;
   margin: 2.5rem 0;
+}
+.dark .legal-prose hr {
+  background: #334155;
 }
 
 /* ── Links ── */
@@ -182,8 +231,16 @@ body {
   font-weight: 700;
   transition: all 0.2s ease;
 }
+.dark .legal-prose a {
+  color: #60a5fa;
+  text-decoration-color: #1e40af;
+}
 
 .legal-prose a:hover {
   text-decoration-color: #2563eb;
   color: #1d4ed8;
+}
+.dark .legal-prose a:hover {
+  text-decoration-color: #60a5fa;
+  color: #93c5fd;
 }
