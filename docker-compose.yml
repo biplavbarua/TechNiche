@@ -16,7 +16,7 @@ services:
       - ./backend/app:/app/app
     restart: always
 
-# Frontend is managed by Vercel for this project structure, 
+  # Frontend is managed by Render, but can be added here if needed
 # but if you wanted to run it locally with docker:
 #  frontend:
 #    build: ./frontend
