@@ -57,7 +57,9 @@ frontend/*.log
 # Exclude text/script files not needed in repo root
 *.txt
 *.sh
-# But always include requirements files (needed by CI)
+# But always include requirements files and render scripts (needed by CI)
+!backend/build_render.sh
+!backend/start_render.sh
 !backend/requirements*.txt
 !README.md
 !backend/scripts/README.md
