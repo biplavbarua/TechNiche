@@ -31,7 +31,7 @@ services:
     startCommand: "npm run start"
     envVars:
       - key: NEXT_PUBLIC_API_URL
-        value: https://legal-ai-backend.onrender.com
+        value: https://legal-ai-backend-z9va.onrender.com
       - key: NODE_VERSION
         value: 20.11.0 # Or appropriate node version
     autoDeploy: true

@@ -13,7 +13,7 @@ jobs:
       - name: Ping Render Backend
         run: |
           echo "Pinging backend to keep it awake..."
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://legal-ai-backend.onrender.com/)
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://legal-ai-backend-z9va.onrender.com/)
           echo "Backend returned HTTP $HTTP_STATUS"
           if [ "$HTTP_STATUS" -ne 200 ]; then
             echo "Warning: Backend did not return 200 OK. It returned $HTTP_STATUS."
