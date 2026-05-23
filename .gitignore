@@ -77,4 +77,3 @@ backend/test_*.py
 backend/chroma_db_test/
 frontend/playwright-test.js
 frontend/node-v20.12.2-darwin-arm64.tar.gz
-render.yaml

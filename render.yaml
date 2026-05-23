@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: legal-ai-backend
+    env: python
+    region: singapore # Closest to India
+    plan: free
+    buildCommand: "./backend/build_render.sh" # Optional if we need build steps, but start command handles install
+    startCommand: "./backend/start_render.sh"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: OPENROUTER_API_KEY
+        sync: false # User must provide this
+      - key: PINECONE_API_KEY
+        sync: false # User must provide this
+      - key: PINECONE_INDEX_NAME
+        value: indian-law
+      - key: GOOGLE_API_KEY
+        sync: false # Optional
+      - key: ALLOWED_ORIGINS
+        value: http://localhost:3000,https://biplavbarua.dev,https://www.biplavbarua.dev,https://techniche-frontend.onrender.com
+    autoDeploy: true
+
+  - type: web
+    name: techniche-frontend
+    env: node
+    region: singapore
+    plan: free
+    rootDir: frontend
+    buildCommand: "npm install && npm run build"
+    startCommand: "npm run start"
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        value: https://techniche.onrender.com
+      - key: NODE_VERSION
+        value: 20.11.0 # Or appropriate node version
+    autoDeploy: true
