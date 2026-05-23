@@ -18,7 +18,7 @@ services:
       - key: GOOGLE_API_KEY
         sync: false # Optional
       - key: ALLOWED_ORIGINS
-        value: http://localhost:3000,https://biplavbarua.dev,https://www.biplavbarua.dev,https://techniche-frontend.onrender.com
+        value: http://localhost:3000,https://app.biplavbarua.dev,https://techniche-frontend.onrender.com
     autoDeploy: true
 
   - type: web
