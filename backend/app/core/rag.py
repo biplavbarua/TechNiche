@@ -45,16 +45,10 @@ except Exception as e:
 # ─── LLM Models (Free models fallback cascade) ───────────────────────────────
 
 MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "minimax/minimax-m2.5:free",
-    "stepfun/step-3.5-flash:free",
-    "arcee-ai/trinity-large-preview:free",
-    "liquid/lfm-2.5-1.2b-thinking:free",
-    "liquid/lfm-2.5-1.2b-instruct:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "nvidia/nemotron-nano-9b-v2:free",
     "nvidia/nemotron-3-nano-30b-a3b:free",
-    "arcee-ai/trinity-mini:free",
-    "nvidia/nemotron-nano-12b-v2-vl:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free"
+    "google/gemini-2.0-flash-lite-preview-02-05:free"
 ]
 
 
@@ -314,30 +308,42 @@ def query_legal_assistant(user_query: str):
     print(f"DEBUG: Starting Pinecone search for query: {user_query}")
     print(f"{'='*60}")
     try:
-        search_results = index.search(
+        pc = get_pinecone_client()
+        embeddings = pc.inference.embed(
+            model=EMBED_MODEL,
+            inputs=[user_query],
+            parameters={"input_type": "query"}
+        )
+        query_vector = embeddings[0].values
+
+        search_results = index.query(
             namespace="__default__",
-            query={
-                "top_k": TOP_K,
-                "inputs": {"text": user_query},
-                "filter": {"status": {"$eq": "active"}}
-            }
+            vector=query_vector,
+            top_k=TOP_K,
+            include_metadata=True,
+            filter={"status": {"$eq": "active"}}
         )
         
         hits = []
-        if search_results and hasattr(search_results, 'result') and search_results.result.hits:
-            hits = search_results.result.hits
-        
-        print(f"DEBUG: Pinecone search returned {len(hits)} raw hits.")
-        for hit in hits:
-            score = hit.get("_score", 0)
-            # Pinecone returns metadata in 'fields' for serverless, or 'metadata' for pod
-            meta = hit.get("fields", {}) or hit.get("metadata", {})
+        print(f"DEBUG: Pinecone search returned {len(search_results.matches)} raw hits.")
+        for hit in search_results.matches:
+            score = getattr(hit, "score", 0)
+            meta = getattr(hit, "metadata", {})
+            if not isinstance(meta, dict):
+                meta = dict(meta) if meta else {}
+                
+            hit_dict = {
+                "_score": score,
+                "fields": meta,
+                "metadata": meta
+            }
+            
             title = meta.get("title", "Unknown")
             print(f"  HIT: score={score:.4f}  title={title}")
+            hits.append(hit_dict)
         
         # ── 2. Multi-gate relevance assessment ──
-        # The new _assess_relevance expects the raw search_results dict, not just hits
-        is_relevant = _assess_relevance(user_query, search_results.result.to_dict()) # Pass the full result dict
+        is_relevant = _assess_relevance(user_query, {"matches": hits})
         print(f"DEBUG RELEVANCE DECISION: is_relevant={is_relevant}")
         
         if is_relevant and hits: # If LLM says relevant, proceed with filtering
