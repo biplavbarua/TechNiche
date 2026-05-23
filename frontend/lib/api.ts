@@ -26,8 +26,8 @@ const getBackendUrl = () => {
     if (process.env.NODE_ENV === "development") {
         return "http://localhost:8000";
     }
-    // In production, use relative path to leverage Next.js rewrites/Vercel proxy
-    return "";
+    // In production, use the explicitly set backend URL
+    return process.env.NEXT_PUBLIC_API_URL || "";
 };
 
 export async function analyzeIdea(idea: string): Promise<AnalysisResult> {

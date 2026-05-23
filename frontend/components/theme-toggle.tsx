@@ -27,7 +27,7 @@ export function ThemeToggle() {
             <div className="relative w-5 h-5">
                 <motion.div
                     initial={false}
-                    animate={{ scale: resolvedTheme === "dark" ? 0 : 1, rotate: resolvedTheme === "dark" ? 90 : 0 }}
+                    animate={{ scale: resolvedTheme === "dark" ? 1 : 0, rotate: resolvedTheme === "dark" ? 90 : 0 }}
                     transition={{ duration: 0.2 }}
                     className="absolute inset-0 flex items-center justify-center text-slate-800 dark:text-slate-200"
                 >
@@ -35,7 +35,7 @@ export function ThemeToggle() {
                 </motion.div>
                 <motion.div
                     initial={false}
-                    animate={{ scale: resolvedTheme === "dark" ? 1 : 0, rotate: resolvedTheme === "dark" ? 0 : -90 }}
+                    animate={{ scale: resolvedTheme === "dark" ? 0 : 1, rotate: resolvedTheme === "dark" ? 0 : -90 }}
                     transition={{ duration: 0.2 }}
                     className="absolute inset-0 flex items-center justify-center text-slate-800 dark:text-slate-200"
                 >
