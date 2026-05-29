@@ -1,12 +1,14 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl
 from app.core.rag import query_legal_assistant, EMBED_MODEL
 from app.core.crawler import crawl_and_ingest
-from app.ingest import ingest_case_from_url
+from app.ingest import ingest_case_from_url, ingest_case_from_file
 from app.utils.pinecone import get_pinecone_index, get_pinecone_client
 import time
 import os
+import tempfile
+from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
@@ -105,6 +107,75 @@ def learn_from_url(request: LearnRequest):
         return {"message": "Successfully ingested content from verified URL.", "url": str(request.url)}
     else:
         raise HTTPException(status_code=400, detail="Failed to ingest content. Check URL or content accessibility.")
+
+
+# Supported file types for upload ingestion
+_SUPPORTED_UPLOAD_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",        # .xlsx
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",# .pptx
+    "application/msword",          # legacy .doc
+    "text/plain",
+    "text/html",
+    "text/csv",
+    "application/json",
+    "application/epub+zip",
+    "image/jpeg",
+    "image/png",
+    "application/zip",
+}
+
+
+@app.post("/api/learn/file")
+async def learn_from_file(file: UploadFile = File(...)):
+    """
+    Ingest a local file (PDF, DOCX, XLSX, PPTX, image, ZIP, …) into the
+    knowledge base.
+
+    The file is converted to clean Markdown by MarkItDown before being
+    chunked, embedded, and stored in Pinecone.  For PDF/DOCX/PPTX/XLSX
+    the OCR plugin is used automatically so scanned documents work too.
+    """
+    if file.content_type not in _SUPPORTED_UPLOAD_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"Unsupported file type '{file.content_type}'. "
+                f"Supported: PDF, DOCX, XLSX, PPTX, images, ZIP, TXT, HTML, CSV, JSON, EPub."
+            ),
+        )
+
+    # Write to a named temp file so MarkItDown can detect the extension
+    suffix = Path(file.filename).suffix if file.filename else ".bin"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+
+    try:
+        title = Path(file.filename).stem.replace("_", " ").replace("-", " ") if file.filename else None
+        success = ingest_case_from_file(tmp_path, title=title)
+    finally:
+        # Always clean up the temp file
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    if success:
+        return {
+            "message": f"Successfully ingested '{file.filename}'.",
+            "file_name": file.filename,
+            "content_type": file.content_type,
+        }
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Failed to ingest '{file.filename}'. "
+                "The file may be empty, corrupt, or contain no extractable text."
+            ),
+        )
 
 @app.post("/api/analyze")
 def analyze_idea(request: AnalysisRequest):
