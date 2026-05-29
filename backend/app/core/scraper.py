@@ -83,14 +83,14 @@ def fetch_case_text(url: str) -> str:
     Fetches the text content of a legal case from IndianKanoon or similar.
 
     Strategy:
-      1. Download the page HTML.
-      2. Scope to the judgment container (strips nav/ads/footer via BeautifulSoup).
-      3. Convert the scoped HTML to clean Markdown via MarkItDown.
-
-    This two-step approach preserves structured headings (## HELD, ## ORDER)
-    while eliminating site chrome — producing ~20–35% fewer tokens than the
-    previous approach for the same document.
+      1. Check if the URL is an IndianKanoon doc and IK_API_TOKEN is present.
+         If so, fetch via the official IK API to bypass 403 blocks.
+      2. Otherwise, download the page HTML normally.
+      3. Scope to the judgment container (strips nav/ads/footer).
+      4. Convert the scoped HTML to clean Markdown via MarkItDown.
     """
+    import os
+    import re
     try:
         headers = {
             "User-Agent": (
@@ -99,18 +99,45 @@ def fetch_case_text(url: str) -> str:
                 "Chrome/91.0.4472.114 Safari/537.36"
             )
         }
-        time.sleep(1)  # Respectful rate-limiting
-
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-
-        # Step 1: Scope to judgment container using BeautifulSoup
-        scoped_html = _extract_judgment_html(response.content)
+        
+        scoped_html = None
+        
+        # Step 1: Check for IndianKanoon URL and API Token
+        ik_token = os.environ.get("IK_API_TOKEN")
+        ik_match = re.search(r"indiankanoon\.org/doc/([0-9]+)/?", url)
+        
+        if ik_match and ik_token:
+            docid = ik_match.group(1)
+            api_url = f"https://api.indiankanoon.org/doc/{docid}/"
+            logger.info(f"Using official IndianKanoon API for docid: {docid}")
+            api_headers = {
+                "Authorization": f"Token {ik_token}",
+                "Accept": "application/json"
+            }
+            try:
+                # IK API requires POST
+                api_resp = requests.post(api_url, headers=api_headers, timeout=10)
+                api_resp.raise_for_status()
+                data = api_resp.json()
+                if "doc" in data:
+                    # Enriched HTML from API
+                    scoped_html = data["doc"].encode("utf-8")
+                else:
+                    logger.warning("IK API response did not contain 'doc'. Falling back.")
+            except Exception as e:
+                logger.warning(f"IK API failed ({e}). Falling back to web scraper.")
+        
+        # Step 2: Fallback to web scraping if API wasn't used or failed
+        if not scoped_html:
+            time.sleep(1)  # Respectful rate-limiting
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            scoped_html = _extract_judgment_html(response.content)
 
         converter = _get_md_converter()
 
         if converter is not None:
-            # Step 2: Convert scoped HTML to clean Markdown
+            # Step 3: Convert scoped HTML to clean Markdown
             result = converter.convert_stream(
                 io.BytesIO(scoped_html),
                 file_extension=".html",
@@ -120,9 +147,9 @@ def fetch_case_text(url: str) -> str:
         else:
             # Fallback: plain text extraction from the scoped HTML
             soup = BeautifulSoup(scoped_html, "html.parser")
-            text = soup.get_text(separator="\n", strip=True)
+            text = soup.get_text(separator="\\n", strip=True)
 
-        cleaned = "\n".join(line for line in text.splitlines() if line.strip())
+        cleaned = "\\n".join(line for line in text.splitlines() if line.strip())
         if not cleaned:
             logger.warning(f"Conversion produced empty text for: {url}")
         return cleaned
