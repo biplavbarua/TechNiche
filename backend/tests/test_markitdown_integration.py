@@ -144,6 +144,38 @@ class TestScraperMarkItDown:
         assert "Advertisement" not in text, "Ad text leaked into output"
 
     @patch("app.core.scraper.requests.get")
+    def test_fallback_strips_noise_when_no_container_found(self, mock_get):
+        """
+        When no <div class='judgments'> container exists, the fallback path
+        must still strip nav/header/footer/ads before MarkItDown conversion.
+        """
+        # HTML without a judgment container — only nav + content + footer
+        no_container_html = b"""
+        <html><body>
+          <nav class="navbar">Home | Login | Register | Share on Facebook</nav>
+          <header>IndianKanoon Header</header>
+          <div id="content">
+            <h2>Supreme Court of India</h2>
+            <p>The appeal is allowed with costs. Judgment pronounced.</p>
+          </div>
+          <footer>Copyright IndianKanoon 2024 | Privacy Policy</footer>
+          <div class="ads">Advertisement content</div>
+        </body></html>
+        """
+        mock_get.return_value = self._mock_response(no_container_html)
+        from app.core.scraper import fetch_case_text
+
+        text = fetch_case_text("https://indiankanoon.org/doc/9999/")
+
+        assert text, "fetch_case_text() returned empty string on fallback path"
+        # Core legal content must be present
+        assert "appeal is allowed" in text.lower() or "Supreme Court" in text
+        # Nav/footer should be stripped
+        assert "Copyright IndianKanoon" not in text, "Footer not stripped in fallback path"
+        assert "Advertisement" not in text, "Ad not stripped in fallback path"
+
+
+    @patch("app.core.scraper.requests.get")
     def test_markitdown_preserves_judgment_content(self, mock_get):
         """Legal content (HELD, ORDER) must survive HTML → Markdown conversion."""
         mock_get.return_value = self._mock_response(SAMPLE_INDIANKANOON_HTML)

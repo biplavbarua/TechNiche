@@ -28,22 +28,54 @@ def _get_md_converter():
 
 def _extract_judgment_html(response_content: bytes) -> bytes:
     """
-    Uses BeautifulSoup to isolate the main judgment container from the full
-    IndianKanoon page HTML.
+    Scopes the raw HTML to the main judgment content before MarkItDown
+    conversion, stripping site chrome (nav bars, ads, footers, scripts).
 
-    IndianKanoon wraps the actual judgment in a <div class="judgments"> or
-    <div class="doc_content"> element.  Extracting just that div before
-    handing it to MarkItDown prevents navigation bars, share buttons, ads,
-    and footers from appearing in the converted Markdown.
+    Strategy:
+      1. Try a priority list of judgment-specific containers.
+      2. If none found, surgically remove all known noise elements from the
+         full-page soup before handing the pruned HTML to MarkItDown.
 
-    Returns the scoped HTML bytes, or the full page if no container is found.
+    This ensures MarkItDown always receives clean, scoped HTML regardless of
+    whether the target page uses a known container class.
     """
     soup = BeautifulSoup(response_content, "html.parser")
-    container = soup.find("div", class_="judgments") or soup.find("div", class_="doc_content")
+
+    # Priority list of judgment content containers used across Indian legal portals
+    container = (
+        soup.find("div", class_="judgments")
+        or soup.find("div", class_="doc_content")
+        or soup.find("div", class_="judgment-text")
+        or soup.find("div", id="doc_content")
+        or soup.find("div", id="judgment")
+        or soup.find("article")
+        or soup.find("main")
+        or soup.find("div", id="content")
+    )
+
     if container:
         return str(container).encode()
-    # Fallback: return the full page for MarkItDown to process
-    return response_content
+
+    # ── Fallback: strip all noise from the full page, then hand to MarkItDown ──
+    # Remove structural noise tags outright
+    for tag in soup.find_all(["nav", "header", "footer", "aside", "script", "style", "noscript"]):
+        tag.decompose()
+
+    # Remove elements with noise-indicating CSS classes or IDs
+    _NOISE_TOKENS = {
+        "nav", "navigation", "navbar", "sidebar", "side-bar",
+        "ad", "ads", "advert", "advertisement",
+        "share", "social", "cookie", "banner",
+        "menu", "header", "footer", "breadcrumb", "pagination",
+    }
+    for el in soup.find_all(True):
+        classes = " ".join(el.get("class", [])).lower()
+        el_id   = (el.get("id") or "").lower()
+        if any(tok in classes or tok in el_id for tok in _NOISE_TOKENS):
+            el.decompose()
+
+    return str(soup).encode()
+
 
 
 def fetch_case_text(url: str) -> str:
