@@ -147,9 +147,14 @@ def crawl_url(request: CrawlRequest):
 def test_ik_api():
     import os
     import requests
+    from app.core.scraper import fetch_case_text
+    import traceback
+    
+    results = {}
     ik_token = os.environ.get("IK_API_TOKEN", "").strip()
     if not ik_token:
-        return {"error": "IK_API_TOKEN not found"}
+        results["error"] = "IK_API_TOKEN not found"
+        return results
     
     docid = "257876"
     api_url = f"https://api.indiankanoon.org/doc/{docid}/"
@@ -159,12 +164,22 @@ def test_ik_api():
     }
     try:
         api_resp = requests.post(api_url, headers=api_headers, timeout=10)
-        return {
+        results["api_test"] = {
             "status_code": api_resp.status_code,
             "response": api_resp.text[:500]
         }
     except Exception as e:
-        return {"error": str(e)}
+        results["api_test"] = {"error": str(e)}
+        
+    try:
+        text = fetch_case_text("https://indiankanoon.org/doc/257876/")
+        results["fetch_case_text_length"] = len(text)
+        results["fetch_case_text_preview"] = text[:500]
+    except Exception as e:
+        results["fetch_case_text_error"] = str(e)
+        results["fetch_case_text_trace"] = traceback.format_exc()
+        
+    return results
 
 @app.post("/api/learn/url")
 def learn_from_url(request: LearnRequest):
