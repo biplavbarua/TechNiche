@@ -143,6 +143,29 @@ def crawl_url(request: CrawlRequest):
             
     return {"message": f"Successfully scouted and learned {ingested_count} new potential cases.", "cases": cases}
 
+@app.get("/api/health/ik_api")
+def test_ik_api():
+    import os
+    import requests
+    ik_token = os.environ.get("IK_API_TOKEN", "").strip()
+    if not ik_token:
+        return {"error": "IK_API_TOKEN not found"}
+    
+    docid = "257876"
+    api_url = f"https://api.indiankanoon.org/doc/{docid}/"
+    api_headers = {
+        "Authorization": f"Token {ik_token}",
+        "Accept": "application/json"
+    }
+    try:
+        api_resp = requests.post(api_url, headers=api_headers, timeout=10)
+        return {
+            "status_code": api_resp.status_code,
+            "response": api_resp.text[:500]
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.post("/api/learn/url")
 def learn_from_url(request: LearnRequest):
     """

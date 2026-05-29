@@ -103,7 +103,7 @@ def fetch_case_text(url: str) -> str:
         scoped_html = None
         
         # Step 1: Check for IndianKanoon URL and API Token
-        ik_token = os.environ.get("IK_API_TOKEN")
+        ik_token = os.environ.get("IK_API_TOKEN", "").strip()
         ik_match = re.search(r"indiankanoon\.org/doc/([0-9]+)/?", url)
         
         if ik_match and ik_token:
