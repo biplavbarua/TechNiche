@@ -99,7 +99,7 @@ def is_url_already_ingested(url: str) -> bool:
             parameters={"input_type": "query"}
         )
         search_results = index.query(
-            namespace="__default__",
+            namespace="",
             vector=embeddings[0].values,
             top_k=1,
             filter={"url": {"$eq": url}},
@@ -192,7 +192,7 @@ def resolve_legal_conflicts(new_metadata: dict, index=None):
                         "overruled_by": new_case_title,
                         "overruled_on": new_case_date.isoformat() if new_case_date else "UNKNOWN",
                     },
-                    namespace="__default__"
+                    namespace=""
                 )
             except Exception as e:
                 logger.error(f"Failed to mark record {record_id} as overruled: {e}")
@@ -219,7 +219,7 @@ def _find_case_in_db(case_name: str) -> list | None:
         )
 
         search_results = index.query(
-            namespace="__default__",
+            namespace="",
             vector=embeddings[0].values,
             top_k=5,
             filter={"status": {"$eq": "active"}},
@@ -334,7 +334,7 @@ def process_and_store_document(text: str, metadata: dict, doc_id: str = None):
                     "metadata": meta,
                 })
 
-            index.upsert(vectors=vectors, namespace="__default__")
+            index.upsert(vectors=vectors, namespace="")
             stored_count += len(batch)
         
         source = metadata.get('url', 'Unknown Source')
