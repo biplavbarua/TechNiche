@@ -317,7 +317,7 @@ def query_legal_assistant(user_query: str):
         query_vector = embeddings[0].values
 
         search_results = index.query(
-            namespace="__default__",
+            namespace="",
             vector=query_vector,
             top_k=TOP_K,
             include_metadata=True,
