@@ -81,46 +81,45 @@ def read_root():
 
 @app.get("/api/health/diagnostics")
 def run_diagnostics():
+    import traceback
+    import requests
+    from app.ingest import process_and_store_document
     results = {}
     
-    # 1. Test Plain Converter
+    # 1. Test IndianKanoon Reachability (Check if Render IP is blocked)
     try:
-        converter = _get_plain_converter()
-        if converter:
-            results["plain_converter_init"] = "Success"
-        else:
-            results["plain_converter_init"] = "Failed (returned None)"
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+        resp = requests.get("https://indiankanoon.org/doc/1712542/", headers=headers, timeout=10)
+        results["indian_kanoon_status"] = resp.status_code
     except Exception as e:
-        results["plain_converter_init"] = f"Error: {e}\\n{traceback.format_exc()}"
+        results["indian_kanoon_status"] = f"Error: {e}"
         
-    # 2. Test MarkItDown conversion
+    # 2. Test Full Ingestion Pipeline (Memory/Pinecone/Embeddings)
     try:
-        converter = _get_plain_converter()
-        if converter:
-            import io
-            dummy_html = b"<html><body><h1>Test</h1></body></html>"
-            res = converter.convert_stream(io.BytesIO(dummy_html), file_extension=".html")
-            results["plain_convert_test"] = f"Success. Output: {res.text_content}"
-    except Exception as e:
-        results["plain_convert_test"] = f"Error: {e}\\n{traceback.format_exc()}"
+        dummy_text = "# Minerva Mills Ltd v Union of India (1980)\\n\\n## Held\\nParliament has no power to abrogate the fundamental rights."
+        meta = {"title": "Diagnostic Test", "url": "test", "status": "active"}
         
-    # 3. Test OCR Converter
-    try:
-        ocr_conv = _get_ocr_converter()
-        if ocr_conv:
-            results["ocr_converter_init"] = "Success"
-        else:
-            results["ocr_converter_init"] = "Failed (returned None)"
-    except Exception as e:
-        results["ocr_converter_init"] = f"Error: {e}\\n{traceback.format_exc()}"
+        # We will capture stdout/stderr to see what process_and_store_document prints
+        import io, sys
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
         
-    # 4. Test Extraction
-    try:
-        dummy_text = "# Test Case\\n\\n## Held\\nThis is a test case."
-        meta = extract_legal_metadata(dummy_text)
-        results["extraction_test"] = f"Success. Metadata: {meta}"
+        success = process_and_store_document(dummy_text, meta, doc_id="diag_123")
+        
+        stdout_val = sys.stdout.getvalue()
+        stderr_val = sys.stderr.getvalue()
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        
+        results["ingestion_pipeline_success"] = success
+        results["ingestion_pipeline_stdout"] = stdout_val
+        results["ingestion_pipeline_stderr"] = stderr_val
     except Exception as e:
-        results["extraction_test"] = f"Error: {e}\\n{traceback.format_exc()}"
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        results["ingestion_pipeline_error"] = f"Error: {e}\\n{traceback.format_exc()}"
         
     return results
 
