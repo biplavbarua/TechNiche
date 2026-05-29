@@ -5,6 +5,7 @@ import hashlib
 import logging
 import time
 from datetime import date, datetime
+from pathlib import Path
 
 from app.core.scraper import fetch_case_text
 from app.core.extraction import extract_legal_metadata
@@ -377,6 +378,142 @@ def ingest_case_from_url(url: str, title: str = None) -> bool:
         "status": "active"
     }
     
+    return process_and_store_document(text_content, metadata)
+
+
+# ─── File-Based Ingestion ──────────────────────────────────────────────
+
+# File types that may contain scanned/image content needing OCR vision.
+_OCR_EXTENSIONS = {".pdf", ".docx", ".pptx", ".xlsx"}
+
+# Shared plain MarkItDown converter (no LLM, fast for text-native files).
+_md_plain = None
+# OCR-capable MarkItDown converter (uses vision LLM, initialised on demand).
+_md_ocr = None
+
+
+def _get_plain_converter():
+    """Lazy-init a plain MarkItDown converter (no LLM required)."""
+    global _md_plain
+    if _md_plain is None:
+        try:
+            from markitdown import MarkItDown
+            _md_plain = MarkItDown()
+            logger.info("MarkItDown plain converter initialised.")
+        except ImportError:
+            logger.error(
+                "markitdown is not installed. "
+                "Run: pip install 'markitdown[pdf,docx,html,xlsx,pptx]'"
+            )
+    return _md_plain
+
+
+def _get_ocr_converter():
+    """
+    Lazy-init a MarkItDown instance with the markitdown-ocr plugin enabled.
+
+    Uses the same OpenRouter client as extraction.py and reuses the first
+    vision-capable model from the EXTRACTION_MODELS cascade
+    (nvidia/nemotron-nano-12b-v2-vl:free).
+
+    Falls back to the plain converter if the OCR plugin is not installed or
+    no OPENROUTER_API_KEY is configured.
+    """
+    global _md_ocr
+    if _md_ocr is None:
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            logger.warning(
+                "OPENROUTER_API_KEY not set — OCR plugin requires a vision LLM. "
+                "Falling back to plain MarkItDown (text-layer PDF only)."
+            )
+            return _get_plain_converter()
+        try:
+            from markitdown import MarkItDown
+            from openai import OpenAI
+            llm_client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=api_key,
+            )
+            _md_ocr = MarkItDown(
+                enable_plugins=True,
+                llm_client=llm_client,
+                # First vision-capable model in the existing cascade
+                llm_model="nvidia/nemotron-nano-12b-v2-vl:free",
+            )
+            logger.info("MarkItDown OCR converter initialised with vision LLM.")
+        except ImportError as e:
+            logger.warning(
+                f"markitdown-ocr plugin not installed ({e}). "
+                "Run: pip install markitdown-ocr. Falling back to plain converter."
+            )
+            return _get_plain_converter()
+    return _md_ocr
+
+
+def ingest_case_from_file(file_path: str, title: str = None) -> bool:
+    """
+    Converts a local file to clean Markdown via MarkItDown and ingests it
+    into the Pinecone knowledge base.
+
+    Supports: PDF, DOCX, XLSX, PPTX, images (JPEG/PNG), ZIP archives,
+    EPub, HTML, and plain text.
+
+    For PDF/DOCX/PPTX/XLSX files the OCR-capable converter is used so that
+    scanned or image-heavy documents (e.g. older High Court orders) are
+    handled correctly. Plain text-native files use the fast plain converter.
+
+    Args:
+        file_path: Absolute or relative path to the file to ingest.
+        title:     Optional display title. Defaults to the first non-empty
+                   line of the extracted text.
+
+    Returns:
+        True if ingestion succeeded, False otherwise.
+    """
+    path = Path(file_path).resolve()
+    logger.info(f"Ingesting from file: {path}")
+
+    if not path.exists():
+        logger.error(f"File not found: {path}")
+        return False
+
+    # Choose converter based on whether the file may need OCR
+    ext = path.suffix.lower()
+    converter = _get_ocr_converter() if ext in _OCR_EXTENSIONS else _get_plain_converter()
+
+    if converter is None:
+        logger.error("No MarkItDown converter available. Cannot process file.")
+        return False
+
+    try:
+        result = converter.convert(str(path))
+        text_content = result.text_content or ""
+    except Exception as e:
+        logger.error(f"MarkItDown conversion failed for {path}: {e}")
+        return False
+
+    if not text_content or len(text_content.strip()) < 100:
+        logger.warning(f"Conversion produced insufficient text (<100 chars) for: {path}")
+        return False
+
+    if not title:
+        # Use the first non-empty line as the document title
+        title = next(
+            (line.lstrip("# ").strip() for line in text_content.splitlines() if line.strip()),
+            path.name,
+        )
+
+    metadata = {
+        "title": title,
+        "url": f"file://{path}",
+        "source": "file_upload",
+        "file_name": path.name,
+        "file_type": ext.lstrip("."),
+        "ingested_at": str(time.time()),
+        "status": "active",
+    }
+
     return process_and_store_document(text_content, metadata)
 
 

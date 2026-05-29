@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 from datetime import date, datetime
@@ -63,6 +64,78 @@ class CaseMetadata(BaseModel):
         return self
 
 
+# ─── Markdown-aware section extraction ─────────────────────────────────────
+
+# Regex patterns for sections that contain binding legal reasoning.
+# These are prioritised over procedural or background sections.
+_PRIORITY_SECTION_PATTERNS = [
+    r"^#+\s*(held|ratio|order|judgment|decision|conclusion|finding|per curiam)",
+    r"^#+\s*(it is hereby|the court holds|we hold|accordingly|in the result)",
+    r"^#+\s*(operative part|final order|disposition|decree)",
+]
+
+
+def extract_key_sections(markdown_text: str, max_chars: int = 20_000) -> str:
+    """
+    Intelligently extracts the most legally relevant sections from a
+    Markdown-formatted judgment, prioritising binding reasoning over
+    procedural/background content.
+
+    This replaces the naive ``text[:20000]`` truncation that silently
+    discards the *ratio decidendi* in long Supreme Court judgments.
+
+    Strategy:
+      1. Split document on Markdown headings (lines starting with ``#``).
+      2. Mark blocks whose heading matches a priority pattern (HELD, ORDER, …).
+      3. Fill the output budget with: priority blocks first, then others.
+    """
+    if not markdown_text:
+        return ""
+
+    lines = markdown_text.splitlines()
+    priority_blocks: list[str] = []
+    other_blocks: list[str] = []
+    current_lines: list[str] = []
+    is_priority: bool = False
+
+    for line in lines:
+        if line.startswith("#"):  # New section heading
+            if current_lines:
+                block = "\n".join(current_lines)
+                (priority_blocks if is_priority else other_blocks).append(block)
+            current_lines = [line]
+            is_priority = any(
+                re.search(p, line, re.IGNORECASE)
+                for p in _PRIORITY_SECTION_PATTERNS
+            )
+        else:
+            current_lines.append(line)
+
+    # Flush the last block
+    if current_lines:
+        block = "\n".join(current_lines)
+        (priority_blocks if is_priority else other_blocks).append(block)
+
+    # Build output: priority sections first, fill remainder with others
+    result_parts: list[str] = []
+    chars_used = 0
+
+    for block in priority_blocks + other_blocks:
+        if chars_used + len(block) <= max_chars:
+            result_parts.append(block)
+            chars_used += len(block)
+        else:
+            # Append a partial block to fill the remaining budget
+            remaining = max_chars - chars_used
+            if remaining > 200:  # Only worth including if >200 chars remain
+                result_parts.append(block[:remaining])
+            break
+
+    return "\n\n".join(result_parts)
+
+
+# ─── LLM-based metadata extraction ──────────────────────────────────────────
+
 def extract_legal_metadata(raw_scraped_text: str) -> dict:
     """
     Passes raw scraped legal text to the AI to extract structured metadata 
@@ -85,7 +158,11 @@ def extract_legal_metadata(raw_scraped_text: str) -> dict:
         "Do NOT include cases that are merely discussed or distinguished."
     )
     
-    user_prompt = f"Raw Legal Text:\n{raw_scraped_text[:20000]}"
+    # Use Markdown-aware section extraction instead of naive char truncation.
+    # Priority sections (HELD, ORDER, RATIO) are pulled first so the LLM sees
+    # the binding legal reasoning even in very long judgments.
+    key_text = extract_key_sections(raw_scraped_text, max_chars=20_000)
+    user_prompt = f"Court Judgment (Markdown, key sections prioritised):\n{key_text}"
     
     last_error = None
     for model_name in EXTRACTION_MODELS:
