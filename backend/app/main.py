@@ -3,11 +3,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl
 from app.core.rag import query_legal_assistant, EMBED_MODEL
 from app.core.crawler import crawl_and_ingest
-from app.ingest import ingest_case_from_url, ingest_case_from_file
+from app.ingest import ingest_case_from_url, ingest_case_from_file, _get_plain_converter, _get_ocr_converter
+from app.core.extraction import extract_legal_metadata
 from app.utils.pinecone import get_pinecone_index, get_pinecone_client
 import time
 import os
 import tempfile
+import traceback
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
@@ -76,6 +78,51 @@ class LearnRequest(BaseModel):
 @app.get("/")
 def read_root():
     return {"status": "Legal AI Backend is running"}
+
+@app.get("/api/health/diagnostics")
+def run_diagnostics():
+    results = {}
+    
+    # 1. Test Plain Converter
+    try:
+        converter = _get_plain_converter()
+        if converter:
+            results["plain_converter_init"] = "Success"
+        else:
+            results["plain_converter_init"] = "Failed (returned None)"
+    except Exception as e:
+        results["plain_converter_init"] = f"Error: {e}\\n{traceback.format_exc()}"
+        
+    # 2. Test MarkItDown conversion
+    try:
+        converter = _get_plain_converter()
+        if converter:
+            import io
+            dummy_html = b"<html><body><h1>Test</h1></body></html>"
+            res = converter.convert_stream(io.BytesIO(dummy_html), file_extension=".html")
+            results["plain_convert_test"] = f"Success. Output: {res.text_content}"
+    except Exception as e:
+        results["plain_convert_test"] = f"Error: {e}\\n{traceback.format_exc()}"
+        
+    # 3. Test OCR Converter
+    try:
+        ocr_conv = _get_ocr_converter()
+        if ocr_conv:
+            results["ocr_converter_init"] = "Success"
+        else:
+            results["ocr_converter_init"] = "Failed (returned None)"
+    except Exception as e:
+        results["ocr_converter_init"] = f"Error: {e}\\n{traceback.format_exc()}"
+        
+    # 4. Test Extraction
+    try:
+        dummy_text = "# Test Case\\n\\n## Held\\nThis is a test case."
+        meta = extract_legal_metadata(dummy_text)
+        results["extraction_test"] = f"Success. Metadata: {meta}"
+    except Exception as e:
+        results["extraction_test"] = f"Error: {e}\\n{traceback.format_exc()}"
+        
+    return results
 
 @app.post("/api/crawl")
 def crawl_url(request: CrawlRequest):
