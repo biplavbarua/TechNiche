@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, BookOpen, Loader2, CheckCircle, AlertCircle } from "lucide-react";
+import { X, BookOpen, Loader2, CheckCircle, AlertCircle, Clock } from "lucide-react";
 import { learnFromUrl } from "@/lib/api";
 
 interface LearningModalProps {
@@ -12,30 +12,49 @@ interface LearningModalProps {
 
 export function LearningModal({ isOpen, onClose }: LearningModalProps) {
     const [url, setUrl] = useState("");
-    const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+    const [status, setStatus] = useState<"idle" | "queued" | "processing" | "success" | "error">("idle");
     const [message, setMessage] = useState("");
+
+    const isLoading = status === "queued" || status === "processing";
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!url) return;
 
-        setStatus("loading");
-        setMessage("");
+        setStatus("queued");
+        setMessage("Queuing ingestion job...");
 
         try {
+            // learnFromUrl posts to /api/learn/url (202) then polls /api/tasks/{id}
+            setStatus("processing");
+            setMessage("Fetching case from IndianKanoon API, extracting metadata, and storing embeddings. This may take 30–90 seconds...");
+
             const result = await learnFromUrl(url);
             setStatus("success");
-            setMessage(result.message);
+            setMessage(result.message || "Successfully ingested into the knowledge base.");
             setUrl("");
             setTimeout(() => {
                 setStatus("idle");
                 setMessage("");
                 onClose();
-            }, 3000);
+            }, 4000);
         } catch (err: any) {
             setStatus("error");
-            setMessage(err.message || "Failed to learn from URL");
+            setMessage(err.message || "Failed to learn from URL. Please try again.");
         }
+    };
+
+    const getStatusIcon = () => {
+        if (status === "success") return <CheckCircle className="w-4 h-4 flex-shrink-0" />;
+        if (status === "error") return <AlertCircle className="w-4 h-4 flex-shrink-0" />;
+        if (status === "processing") return <Clock className="w-4 h-4 flex-shrink-0 animate-pulse" />;
+        return null;
+    };
+
+    const getStatusStyle = () => {
+        if (status === "success") return "text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-500/10";
+        if (status === "error") return "text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10";
+        return "text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-500/10";
     };
 
     return (
@@ -47,7 +66,7 @@ export function LearningModal({ isOpen, onClose }: LearningModalProps) {
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        onClick={onClose}
+                        onClick={!isLoading ? onClose : undefined}
                         className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50"
                     />
 
@@ -70,13 +89,14 @@ export function LearningModal({ isOpen, onClose }: LearningModalProps) {
                                                 Teach the AI
                                             </h3>
                                             <p className="text-sm text-slate-500 dark:text-slate-400">
-                                                Add knowledge from Indian Kanoon
+                                                Add a case from IndianKanoon
                                             </p>
                                         </div>
                                     </div>
                                     <button
-                                        onClick={onClose}
-                                        className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+                                        onClick={!isLoading ? onClose : undefined}
+                                        disabled={isLoading}
+                                        className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                                     >
                                         <X className="w-5 h-5" />
                                     </button>
@@ -85,45 +105,51 @@ export function LearningModal({ isOpen, onClose }: LearningModalProps) {
                                 <form onSubmit={handleSubmit} className="space-y-4">
                                     <div>
                                         <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                                            Case URL (Search Result)
+                                            IndianKanoon Case URL
                                         </label>
                                         <input
                                             type="url"
                                             value={url}
                                             onChange={(e) => setUrl(e.target.value)}
-                                            placeholder="https://indiankanoon.org/search/..."
-                                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all font-mono text-sm"
+                                            placeholder="https://indiankanoon.org/doc/1712542/"
+                                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all font-mono text-sm disabled:opacity-50"
                                             required
+                                            disabled={isLoading}
                                         />
+                                        <p className="mt-1.5 text-xs text-slate-400">
+                                            Paste a direct doc URL, e.g.{" "}
+                                            <span className="font-mono">indiankanoon.org/doc/257876/</span>
+                                        </p>
                                     </div>
 
                                     {/* Status Messages */}
-                                    {status === "error" && (
-                                        <div className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10 p-3 rounded-lg">
-                                            <AlertCircle className="w-4 h-4" />
-                                            {message}
+                                    {message && status !== "idle" && (
+                                        <div className={`flex items-start gap-2 text-sm p-3 rounded-lg ${getStatusStyle()}`}>
+                                            {getStatusIcon()}
+                                            <span>{message}</span>
                                         </div>
                                     )}
-                                    {status === "success" && (
-                                        <div className="flex items-center gap-2 text-sm text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-500/10 p-3 rounded-lg">
-                                            <CheckCircle className="w-4 h-4" />
-                                            {message}
+
+                                    {/* Progress bar while processing */}
+                                    {isLoading && (
+                                        <div className="w-full h-1.5 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                                            <div className="h-full bg-indigo-500 rounded-full animate-pulse w-full origin-left" style={{ animation: "progress-indeterminate 2s ease-in-out infinite" }} />
                                         </div>
                                     )}
 
                                     <div className="pt-2">
                                         <button
                                             type="submit"
-                                            disabled={status === "loading"}
+                                            disabled={isLoading}
                                             className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-all shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
                                         >
-                                            {status === "loading" ? (
+                                            {isLoading ? (
                                                 <>
                                                     <Loader2 className="w-4 h-4 animate-spin" />
-                                                    Crawling & Learning...
+                                                    {status === "queued" ? "Queuing..." : "Processing..."}
                                                 </>
                                             ) : (
-                                                "Start Learning"
+                                                "Add to Knowledge Base"
                                             )}
                                         </button>
                                     </div>
@@ -131,7 +157,7 @@ export function LearningModal({ isOpen, onClose }: LearningModalProps) {
                             </div>
                             <div className="bg-slate-50 dark:bg-slate-950/50 px-6 py-4 border-t border-slate-100 dark:border-slate-800">
                                 <p className="text-xs text-slate-500 text-center">
-                                    This will crawl the URL, extract cases, generating embeddings, and update the memory bank instantly.
+                                    The case will be fetched via IndianKanoon API, AI-parsed, chunked, and embedded into the knowledge base. Processing takes 30–90 seconds.
                                 </p>
                             </div>
                         </div>

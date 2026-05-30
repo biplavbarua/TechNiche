@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl
 from app.core.rag import query_legal_assistant, EMBED_MODEL
@@ -8,19 +8,73 @@ from app.core.extraction import extract_legal_metadata
 from app.utils.pinecone import get_pinecone_index, get_pinecone_client
 import time
 import os
+import uuid
 import tempfile
 import traceback
+import threading
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
+from typing import Literal
+
+# ─── In-memory Task Registry ────────────────────────────────────────────────
+# Stores status of background ingestion jobs. Thread-safe via Lock.
+# Keys: task_id (str), Values: dict with status/result/error
+_task_registry: dict[str, dict] = {}
+_task_lock = threading.Lock()
+
+
+def _set_task(task_id: str, status: Literal["pending", "running", "done", "failed"], **kwargs):
+    with _task_lock:
+        _task_registry[task_id] = {"status": status, "task_id": task_id, **kwargs}
+
+
+def _get_task(task_id: str) -> dict | None:
+    with _task_lock:
+        return _task_registry.get(task_id)
+
+
+# ─── Background Workers ──────────────────────────────────────────────────────
+
+def _run_url_ingestion(task_id: str, url: str):
+    """Background worker: fetch, embed and store a case from a URL."""
+    _set_task(task_id, "running", url=url, started_at=time.time())
+    try:
+        success = ingest_case_from_url(url)
+        if success:
+            _set_task(task_id, "done", url=url, message="Successfully ingested content from verified URL.")
+        else:
+            _set_task(task_id, "failed", url=url, error="Ingestion returned False. URL may already be ingested, or content could not be extracted.")
+    except Exception as e:
+        _set_task(task_id, "failed", url=url, error=str(e), trace=traceback.format_exc())
+
+
+def _run_file_ingestion(task_id: str, tmp_path: str, original_filename: str, title: str | None):
+    """Background worker: convert, embed and store a case from a temp file."""
+    _set_task(task_id, "running", file_name=original_filename, started_at=time.time())
+    try:
+        success = ingest_case_from_file(tmp_path, title=title)
+        if success:
+            _set_task(task_id, "done", file_name=original_filename, message=f"Successfully ingested '{original_filename}'.")
+        else:
+            _set_task(task_id, "failed", file_name=original_filename, error="Ingestion returned False. File may be empty, corrupt, or contain no extractable text.")
+    except Exception as e:
+        _set_task(task_id, "failed", file_name=original_filename, error=str(e), trace=traceback.format_exc())
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+# ─── FastAPI App ─────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Verify Pinecone connection on startup
     try:
         index = get_pinecone_index()
-        # Get the index stats to verify connection
         stats = index.describe_index_stats()
         print(f"Connected to Pinecone index: {os.getenv('PINECONE_INDEX_NAME')}")
         print(f"Total vector count: {stats['total_vector_count']}")
@@ -63,6 +117,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ─── Pydantic Models ──────────────────────────────────────────────────────────
+
 class AnalysisRequest(BaseModel):
     idea: str = Field(..., min_length=5, description="The abstract idea to analyze")
 
@@ -73,130 +129,61 @@ class CrawlRequest(BaseModel):
     url: HttpUrl = Field(..., description="The URL to crawl for related cases")
 
 class LearnRequest(BaseModel):
-    url: HttpUrl = Field(..., description="The Wikipedia URL to learn from")
+    url: HttpUrl = Field(..., description="The IndianKanoon URL to learn from")
+
+# ─── Core Endpoints ───────────────────────────────────────────────────────────
 
 @app.get("/")
 def read_root():
     return {"status": "Legal AI Backend is running"}
 
-@app.get("/api/health/diagnostics")
-def run_diagnostics():
-    import traceback
-    import requests
-    from app.ingest import process_and_store_document
-    results = {}
-    
-    # 1. Test IndianKanoon Reachability (Check if Render IP is blocked)
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
-        resp = requests.get("https://indiankanoon.org/doc/1712542/", headers=headers, timeout=10)
-        results["indian_kanoon_status"] = resp.status_code
-    except Exception as e:
-        results["indian_kanoon_status"] = f"Error: {e}"
-        
-    # 2. Test Full Ingestion Pipeline (Memory/Pinecone/Embeddings)
-    try:
-        dummy_text = "# Minerva Mills Ltd v Union of India (1980)\\n\\n## Held\\nParliament has no power to abrogate the fundamental rights."
-        meta = {"title": "Diagnostic Test", "url": "test", "status": "active"}
-        
-        # We will capture stdout/stderr to see what process_and_store_document prints
-        import io, sys
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        sys.stdout = io.StringIO()
-        sys.stderr = io.StringIO()
-        
-        success = process_and_store_document(dummy_text, meta, doc_id="diag_123")
-        
-        stdout_val = sys.stdout.getvalue()
-        stderr_val = sys.stderr.getvalue()
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-        
-        results["ingestion_pipeline_success"] = success
-        results["ingestion_pipeline_stdout"] = stdout_val
-        results["ingestion_pipeline_stderr"] = stderr_val
-    except Exception as e:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-        results["ingestion_pipeline_error"] = f"Error: {e}\\n{traceback.format_exc()}"
-        
-    return results
+@app.post("/api/query")
+def query_assistant(request: QueryRequest):
+    result = query_legal_assistant(request.query)
+    return JSONResponse(content=result)
 
-@app.post("/api/crawl")
-def crawl_url(request: CrawlRequest):
-    """
-    Autonomous Learning Endpoint.
-    Crawls the given URL for more cases and ingests them.
-    """
-    # 1. Scout for new cases
-    cases = crawl_and_ingest(str(request.url), limit=3)
-    ingested_count = 0
-    
-    # 2. Ingest found cases
-    for case in cases:
-        success = ingest_case_from_url(case['url'], title=case['title'])
-        if success:
-            ingested_count += 1
-            # Politeness delay
-            time.sleep(2)
-            
-    return {"message": f"Successfully scouted and learned {ingested_count} new potential cases.", "cases": cases}
+@app.post("/api/analyze")
+def analyze_idea(request: AnalysisRequest):
+    result = query_legal_assistant(request.idea)
+    return JSONResponse(content=result)
 
-@app.get("/api/health/ik_api")
-def test_ik_api():
-    import os
-    import requests
-    from app.core.scraper import fetch_case_text
-    import traceback
-    
-    results = {}
-    ik_token = os.environ.get("IK_API_TOKEN", "").strip()
-    if not ik_token:
-        results["error"] = "IK_API_TOKEN not found"
-        return results
-    
-    docid = "257876"
-    api_url = f"https://api.indiankanoon.org/doc/{docid}/"
-    api_headers = {
-        "Authorization": f"Token {ik_token}",
-        "Accept": "application/json"
+# ─── Ingestion Endpoints (Non-Blocking) ──────────────────────────────────────
+
+@app.post("/api/learn/url", status_code=202)
+def learn_from_url(request: LearnRequest, background_tasks: BackgroundTasks):
+    """
+    Queue an IndianKanoon URL for ingestion.
+
+    Returns 202 Accepted immediately with a task_id.
+    Poll GET /api/tasks/{task_id} to check progress.
+    The actual fetch → embed → store pipeline runs in the background,
+    bypassing Render's 30-second HTTP gateway timeout.
+    """
+    task_id = str(uuid.uuid4())
+    url = str(request.url)
+    _set_task(task_id, "pending", url=url, queued_at=time.time())
+    background_tasks.add_task(_run_url_ingestion, task_id, url)
+    return {
+        "message": "Ingestion queued. Poll /api/tasks/{task_id} for status.",
+        "task_id": task_id,
+        "url": url,
     }
-    try:
-        api_resp = requests.post(api_url, headers=api_headers, timeout=10)
-        results["api_test"] = {
-            "status_code": api_resp.status_code,
-            "response": api_resp.text[:500]
-        }
-    except Exception as e:
-        results["api_test"] = {"error": str(e)}
-        
-    try:
-        text = fetch_case_text("https://indiankanoon.org/doc/257876/")
-        results["fetch_case_text_length"] = len(text)
-        results["fetch_case_text_preview"] = text[:500]
-        
-        # Test extraction
-        from app.core.extraction import extract_legal_metadata
-        ai_meta = extract_legal_metadata(text[:25000]) # truncated for speed
-        results["extraction_test"] = ai_meta
-    except Exception as e:
-        results["fetch_case_text_error"] = str(e)
-        results["fetch_case_text_trace"] = traceback.format_exc()
-        
-    return results
 
-@app.post("/api/learn/url")
-def learn_from_url(request: LearnRequest):
-    """
-    Manually learn from a specific URL.
-    """
-    success = ingest_case_from_url(str(request.url))
-    if success:
-        return {"message": "Successfully ingested content from verified URL.", "url": str(request.url)}
-    else:
-        raise HTTPException(status_code=400, detail="Failed to ingest content. Check URL or content accessibility.")
 
+@app.get("/api/tasks/{task_id}")
+def get_task_status(task_id: str):
+    """
+    Poll the status of a background ingestion job.
+
+    Returns one of: pending | running | done | failed
+    """
+    task = _get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+    return task
+
+
+# ─── File Upload Endpoint (Non-Blocking) ─────────────────────────────────────
 
 # Supported file types for upload ingestion
 _SUPPORTED_UPLOAD_TYPES = {
@@ -216,15 +203,14 @@ _SUPPORTED_UPLOAD_TYPES = {
 }
 
 
-@app.post("/api/learn/file")
-async def learn_from_file(file: UploadFile = File(...)):
+@app.post("/api/learn/file", status_code=202)
+async def learn_from_file(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     """
-    Ingest a local file (PDF, DOCX, XLSX, PPTX, image, ZIP, …) into the
-    knowledge base.
+    Queue a file for ingestion into the knowledge base.
 
-    The file is converted to clean Markdown by MarkItDown before being
-    chunked, embedded, and stored in Pinecone.  For PDF/DOCX/PPTX/XLSX
-    the OCR plugin is used automatically so scanned documents work too.
+    Accepts PDF, DOCX, XLSX, PPTX, images, ZIP, TXT, HTML, CSV, JSON, EPub.
+    Returns 202 Accepted immediately with a task_id.
+    Poll GET /api/tasks/{task_id} to check progress.
     """
     if file.content_type not in _SUPPORTED_UPLOAD_TYPES:
         raise HTTPException(
@@ -235,70 +221,80 @@ async def learn_from_file(file: UploadFile = File(...)):
             ),
         )
 
-    # Write to a named temp file so MarkItDown can detect the extension
+    # Write to a named temp file so MarkItDown can detect the extension.
+    # The background worker is responsible for deleting it after processing.
     suffix = Path(file.filename).suffix if file.filename else ".bin"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    try:
-        title = Path(file.filename).stem.replace("_", " ").replace("-", " ") if file.filename else None
-        success = ingest_case_from_file(tmp_path, title=title)
-    finally:
-        # Always clean up the temp file
+    title = Path(file.filename).stem.replace("_", " ").replace("-", " ") if file.filename else None
+    task_id = str(uuid.uuid4())
+    _set_task(task_id, "pending", file_name=file.filename, queued_at=time.time())
+    background_tasks.add_task(_run_file_ingestion, task_id, tmp_path, file.filename, title)
+
+    return {
+        "message": "File ingestion queued. Poll /api/tasks/{task_id} for status.",
+        "task_id": task_id,
+        "file_name": file.filename,
+    }
+
+
+# ─── Crawl Endpoint ──────────────────────────────────────────────────────────
+
+@app.post("/api/crawl", status_code=202)
+def crawl_url(request: CrawlRequest, background_tasks: BackgroundTasks):
+    """
+    Scout related cases from a URL and queue them for ingestion.
+    Returns 202 Accepted immediately.
+    """
+    task_id = str(uuid.uuid4())
+
+    def _run_crawl(task_id: str, url: str):
+        _set_task(task_id, "running", url=url, started_at=time.time())
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+            cases = crawl_and_ingest(url, limit=3)
+            ingested_count = 0
+            for case in cases:
+                success = ingest_case_from_url(case['url'], title=case['title'])
+                if success:
+                    ingested_count += 1
+                    time.sleep(2)
+            _set_task(task_id, "done", url=url, ingested_count=ingested_count, cases=cases)
+        except Exception as e:
+            _set_task(task_id, "failed", url=url, error=str(e), trace=traceback.format_exc())
 
-    if success:
-        return {
-            "message": f"Successfully ingested '{file.filename}'.",
-            "file_name": file.filename,
-            "content_type": file.content_type,
-        }
-    else:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Failed to ingest '{file.filename}'. "
-                "The file may be empty, corrupt, or contain no extractable text."
-            ),
-        )
+    _set_task(task_id, "pending", url=str(request.url), queued_at=time.time())
+    background_tasks.add_task(_run_crawl, task_id, str(request.url))
+    return {"message": "Crawl queued.", "task_id": task_id, "url": str(request.url)}
 
-@app.post("/api/analyze")
-def analyze_idea(request: AnalysisRequest):
-    result = query_legal_assistant(request.idea)
-    return JSONResponse(content=result)
 
-@app.post("/api/query")
-def query_assistant(request: QueryRequest):
-    result = query_legal_assistant(request.query)
-    return JSONResponse(content=result)
+# ─── Cases List Endpoint ──────────────────────────────────────────────────────
 
 @app.get("/api/cases")
 def get_cases():
     """
-    Fetch all ingested cases by doing a generic search.
+    Fetch all ingested cases by doing a generic semantic search.
+    Returns the first chunk (chunk_index==0) of every ingested document.
     """
     pc = get_pinecone_client()
     index = get_pinecone_index()
-    
-    # Perform similarity search using inference to find cases
+
     embedding = pc.inference.embed(
         model=EMBED_MODEL,
         inputs=["law case judgment summary research document"],
         parameters={"input_type": "query"}
     )
-    
+
+    # Use empty namespace "" — consistent with the upsert namespace in ingest.py
     search_results = index.query(
-        namespace="__default__",
+        namespace="",
         vector=embedding[0]['values'],
         top_k=100,
         filter={"chunk_index": {"$eq": 0}},
         include_metadata=True
     )
-    
+
     cases = []
     if search_results and hasattr(search_results, 'matches'):
         for match in search_results.matches:
@@ -307,7 +303,88 @@ def get_cases():
                 "id": match.id,
                 "title": meta.get("title", "Unknown Case"),
                 "url": meta.get("url", ""),
-                "score": match.score
+                "score": match.score,
+                "legal_domain": meta.get("ai_legal_domain", ""),
+                "judgment_date": meta.get("ai_judgment_date", ""),
             })
-    
+
     return {"cases": cases}
+
+
+# ─── Diagnostic Endpoints ─────────────────────────────────────────────────────
+
+@app.get("/api/health/diagnostics")
+def run_diagnostics():
+    import requests
+    from app.ingest import process_and_store_document
+    results = {}
+
+    # 1. Test IndianKanoon Reachability
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+        resp = requests.get("https://indiankanoon.org/doc/1712542/", headers=headers, timeout=10)
+        results["indian_kanoon_status"] = resp.status_code
+    except Exception as e:
+        results["indian_kanoon_status"] = f"Error: {e}"
+
+    # 2. Test Full Ingestion Pipeline
+    try:
+        dummy_text = "# Minerva Mills Ltd v Union of India (1980)\n\n## Held\nParliament has no power to abrogate the fundamental rights."
+        meta = {"title": "Diagnostic Test", "url": "test", "status": "active"}
+        import io, sys
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        success = process_and_store_document(dummy_text, meta, doc_id="diag_123")
+        stdout_val = sys.stdout.getvalue()
+        stderr_val = sys.stderr.getvalue()
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        results["ingestion_pipeline_success"] = success
+        results["ingestion_pipeline_stdout"] = stdout_val
+        results["ingestion_pipeline_stderr"] = stderr_val
+    except Exception as e:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        results["ingestion_pipeline_error"] = f"Error: {e}\n{traceback.format_exc()}"
+
+    return results
+
+
+@app.get("/api/health/ik_api")
+def test_ik_api():
+    import requests
+    from app.core.scraper import fetch_case_text
+
+    results = {}
+    ik_token = os.environ.get("IK_API_TOKEN", "").strip()
+    if not ik_token:
+        results["error"] = "IK_API_TOKEN not found"
+        return results
+
+    docid = "257876"
+    api_url = f"https://api.indiankanoon.org/doc/{docid}/"
+    api_headers = {
+        "Authorization": f"Token {ik_token}",
+        "Accept": "application/json"
+    }
+    try:
+        api_resp = requests.post(api_url, headers=api_headers, timeout=10)
+        results["api_test"] = {
+            "status_code": api_resp.status_code,
+            "response": api_resp.text[:500]
+        }
+    except Exception as e:
+        results["api_test"] = {"error": str(e)}
+
+    try:
+        text = fetch_case_text("https://indiankanoon.org/doc/257876/")
+        results["fetch_case_text_length"] = len(text)
+        results["fetch_case_text_preview"] = text[:500]
+        ai_meta = extract_legal_metadata(text[:25000])
+        results["extraction_test"] = ai_meta
+    except Exception as e:
+        results["fetch_case_text_error"] = str(e)
+        results["fetch_case_text_trace"] = traceback.format_exc()
+
+    return results
