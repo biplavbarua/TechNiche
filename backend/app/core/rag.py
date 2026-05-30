@@ -364,7 +364,11 @@ def query_legal_assistant(user_query: str):
                 text = meta.get("text", "")
                 score = doc_hit.get("_score", 0)
 
-                clean_title = title.strip()
+                # Strip markdown heading markers and embedded newlines from stored titles.
+                # Titles are stored as the first line of the doc which may include
+                # "## Case Name\n### Equivalent citations..." from MarkItDown output.
+                import re as _re
+                clean_title = _re.split(r'\\n|\n|###|##', title.lstrip('#').strip())[0].strip()[:150]
 
                 domain = meta.get('ai_legal_domain', '')
                 judgment_date = meta.get('ai_judgment_date', '')
