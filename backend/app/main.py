@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, HttpUrl
@@ -80,10 +83,10 @@ async def lifespan(app: FastAPI):
     try:
         index = get_pinecone_index()
         stats = index.describe_index_stats()
-        print(f"Connected to Pinecone index: {os.getenv('PINECONE_INDEX_NAME')}")
-        print(f"Total vector count: {stats['total_vector_count']}")
+        logger.info(f"Connected to Pinecone index: {os.getenv('PINECONE_INDEX_NAME')}")
+        logger.info(f"Total vector count: {stats['total_vector_count']}")
     except Exception as e:
-        print(f"Warning: Could not connect to Pinecone on startup: {e}")
+        logger.info(f"Warning: Could not connect to Pinecone on startup: {e}")
     yield
 
 app = FastAPI(title="Legal AI Assistant API", lifespan=lifespan)

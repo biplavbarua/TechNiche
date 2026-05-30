@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+
 import os
 import re
 import difflib
@@ -22,7 +25,7 @@ try:
         client = None
 except Exception as e:
     client = None
-    print(f"Warning: Failed to initialize OpenAI client: {e}")
+    logger.info(f"Warning: Failed to initialize OpenAI client: {e}")
 
 # ─── Pinecone Client ─────────────────────────────────────────────────────────
 
@@ -38,7 +41,7 @@ SIMILARITY_THRESHOLD = 0.5  # Ignore anything below 50% match
 try:
     index = get_pinecone_index()
 except Exception as e:
-    print(f"Warning: Failed to initialize Pinecone index: {e}")
+    logger.info(f"Warning: Failed to initialize Pinecone index: {e}")
     index = None
 
 
@@ -70,7 +73,7 @@ def get_llm_response(prompt: str) -> str:
             return response.choices[0].message.content
         except Exception as e:
             last_error = e
-            print(f"Warning: Model {model_name} failed ({e}). Trying next fallback...")
+            logger.info(f"Warning: Model {model_name} failed ({e}). Trying next fallback...")
             continue
             
     return f"Error from AI Provider (All models failed). Last error: {str(last_error)}"
@@ -307,9 +310,9 @@ def query_legal_assistant(user_query: str):
     has_relevant_context = False
     
     # ── 1. Retrieve from Pinecone using Integrated Embeddings ──
-    print(f"\n{'='*60}")
-    print(f"DEBUG: Starting Pinecone search for query: {user_query}")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"DEBUG: Starting Pinecone search for query: {user_query}")
+    logger.info(f"{'='*60}")
     try:
         pc = get_pinecone_client()
         embeddings = pc.inference.embed(
@@ -328,7 +331,7 @@ def query_legal_assistant(user_query: str):
         )
         
         hits = []
-        print(f"DEBUG: Pinecone search returned {len(search_results.matches)} raw hits.")
+        logger.info(f"DEBUG: Pinecone search returned {len(search_results.matches)} raw hits.")
         for hit in search_results.matches:
             score = getattr(hit, "score", 0)
             meta = getattr(hit, "metadata", {})
@@ -342,12 +345,12 @@ def query_legal_assistant(user_query: str):
             }
             
             title = meta.get("title", "Unknown")
-            print(f"  HIT: score={score:.4f}  title={title}")
+            logger.info(f"  HIT: score={score:.4f}  title={title}")
             hits.append(hit_dict)
         
         # ── 2. Multi-gate relevance assessment ──
         is_relevant = _assess_relevance(user_query, {"matches": hits})
-        print(f"DEBUG RELEVANCE DECISION: is_relevant={is_relevant}")
+        logger.info(f"DEBUG RELEVANCE DECISION: is_relevant={is_relevant}")
         
         if is_relevant and hits: # If LLM says relevant, proceed with filtering
             has_relevant_context = True
@@ -390,7 +393,7 @@ def query_legal_assistant(user_query: str):
                         })
                 
     except Exception as e:
-        print(f"CRITICAL RETRIEVAL ERROR: {e}")
+        logger.info(f"CRITICAL RETRIEVAL ERROR: {e}")
         traceback.print_exc()
         context_text = ""
     
@@ -406,11 +409,11 @@ def query_legal_assistant(user_query: str):
     if has_relevant_context and context_text:
         prompt = _build_grounded_prompt(user_query, context_text, detected_domain)
         relevance_quality = "high"
-        print(f"DEBUG: Using GROUNDED prompt with {len(cited_cases)} cited cases.")
+        logger.info(f"DEBUG: Using GROUNDED prompt with {len(cited_cases)} cited cases.")
     else:
         prompt = _build_general_prompt(user_query)
         relevance_quality = "none"
-        print(f"DEBUG: Using GENERAL prompt (no relevant context).")
+        logger.info(f"DEBUG: Using GENERAL prompt (no relevant context).")
     
     analysis = get_llm_response(prompt)
 
@@ -448,7 +451,7 @@ ORIGINAL ANALYSIS:
             # Re-verify after correction to update grounded/ungrounded counts
             citation_check = _verify_citations(analysis, cited_cases)
             citation_check["correction_applied"] = True
-            print(
+            logger.info(
                 f"DEBUG: Citation correction pass applied. "
                 f"Removed hallucinated references: {citation_check.get('ungrounded', [])}"
             )
@@ -458,9 +461,9 @@ ORIGINAL ANALYSIS:
     # (especially important in general analysis mode where cited_cases is empty)
     llm_cited = _extract_llm_cited_cases(analysis)
     
-    print(f"DEBUG: Response generated. relevance_quality={relevance_quality}, "
+    logger.info(f"DEBUG: Response generated. relevance_quality={relevance_quality}, "
           f"cited_cases={cited_cases}, llm_cited={llm_cited}")
-    print(f"{'='*60}\n")
+    logger.info(f"{'='*60}\n")
     
     return {
         "analysis": analysis,

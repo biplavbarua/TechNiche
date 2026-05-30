@@ -39,7 +39,7 @@ export function LearningModal({ isOpen, onClose }: LearningModalProps) {
                 setMessage("");
                 onClose();
             }, 4000);
-        } catch (err: any) {
+        } catch (err: unknown) {
             setStatus("error");
             setMessage(err.message || "Failed to learn from URL. Please try again.");
         }
