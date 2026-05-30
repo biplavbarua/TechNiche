@@ -41,20 +41,15 @@ def _run_url_ingestion(task_id: str, url: str, force: bool = False):
     """Background worker: fetch, embed and store a case from a URL."""
     _set_task(task_id, "running", url=url, started_at=time.time())
     try:
-        from app.ingest import is_url_already_ingested
-        if not force and is_url_already_ingested(url):
-            _set_task(task_id, "done", url=url,
-                      message="URL already in knowledge base (skipped). Use force=true to re-ingest.")
-            return
-        
-        # Call with force=True since we already handled dedup above
-        from app.ingest import ingest_case_from_url
-        success = ingest_case_from_url(url)
+        # Delegate dedup and ingestion entirely to ingest_case_from_url.
+        # That function handles force=True by skipping its internal dedup check.
+        success = ingest_case_from_url(url, force=force)
         if success:
             _set_task(task_id, "done", url=url, message="Successfully ingested content from verified URL.")
         else:
-            _set_task(task_id, "failed", url=url,
-                      error="process_and_store_document returned False. Check Render logs for details.")
+            # False means URL was already in KB (dedup skipped it) — not an error
+            _set_task(task_id, "done", url=url,
+                      message="URL already in knowledge base (skipped). Use force=true to re-ingest.")
     except Exception as e:
         _set_task(task_id, "failed", url=url, error=str(e), trace=traceback.format_exc())
 
@@ -309,10 +304,13 @@ def get_cases():
     if search_results and hasattr(search_results, 'matches'):
         for match in search_results.matches:
             meta = match.metadata
-            # Strip leading markdown heading markers (## / ###) from titles
-            # These appear when the first chunk of a doc starts with a heading
+            # Strip leading markdown heading markers and embedded newlines.
+            # Some titles are stored with the raw first line of the markdown doc,
+            # e.g. "Maneka Gandhi...\n### Equivalent citations..."
+            # \n here may be a literal two-char escape sequence OR a real newline.
+            import re
             raw_title = meta.get("title", "Unknown Case")
-            clean_title = raw_title.lstrip("#").strip().split("\n")[0][:120]
+            clean_title = re.split(r'\\n|\n|###|##', raw_title.lstrip('#').strip())[0].strip()[:120]
             cases.append({
                 "id": match.id,
                 "title": clean_title,

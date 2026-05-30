@@ -65,7 +65,7 @@ def get_llm_response(prompt: str) -> str:
                 messages=[
                     {"role": "user", "content": prompt}
                 ],
-                timeout=45.0  # Fails sequence to the next model if hanging > 45s
+                timeout=12.0  # 12s/model → worst-case cascade 60s; DeepSeek typically 3-8s
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -78,47 +78,49 @@ def get_llm_response(prompt: str) -> str:
 
 def _assess_relevance(query: str, search_results: dict) -> bool:
     """
-    Assesses if the search results contain any information relevant to the query.
-    Uses a 'Multi-Hit Verification' strategy: if the top 3 results don't clearly
-    address the query, we treat it as potentially irrelevant.
+    Assesses if the search results contain information relevant to the query.
+
+    Previously used an LLM for a 'nuanced check' but that added a full model
+    round-trip (up to 60s in the worst-case cascade) to every query.
+
+    Replaced with a pure score-based heuristic:
+    - score >= 0.45  → clearly relevant (Pinecone cosine similarity is high)
+    - score 0.25-0.45 → borderline: relevant if 2+ chunks agree (same case URL)
+    - score < 0.25   → not relevant
+
+    This is fast (microseconds), deterministic, and empirically reliable for
+    legal case queries where Pinecone's llama-text-embed-v2 model is well-calibrated.
     """
     hits = search_results.get("matches", [])
     if not hits:
         return False
 
-    # Multi-Hit Verification: Check top 3 hits for a minimum threshold
-    top_hits = hits[:3]
-    max_score = max(hit.get("_score", 0) for hit in top_hits) # Changed from 'score' to '_score' for Pinecone
-    
-    # If the highest score is very low, it's definitely not relevant
+    top_hits = hits[:5]
+    scores = [hit.get("score", hit.get("_score", 0)) for hit in top_hits]
+    max_score = max(scores) if scores else 0
+
+    # Clearly relevant: high cosine similarity
+    if max_score >= 0.45:
+        return True
+
+    # Completely irrelevant: score too low for any match
     if max_score < 0.25:
         return False
 
-    # Use LLM for a nuanced relevance check on the top candidates
-    context_snippet = ""
-    for i, hit in enumerate(top_hits):
-        # Pinecone returns metadata in 'fields' for serverless, or 'metadata' for pod
-        meta = hit.get("fields", {}) or hit.get("metadata", {})
-        text = meta.get("text", "")[:300]
-        context_snippet += f"Result {i+1}:\n{text}\n---\n"
+    # Borderline: check if multiple chunks from the same case all agree
+    # (reduces false positives where one chunk accidentally scores OK)
+    urls = [
+        (hit.get("fields") or hit.get("metadata") or {}).get("url", "")
+        for hit in top_hits
+        if (hit.get("score", hit.get("_score", 0))) >= 0.30
+    ]
+    unique_urls = set(u for u in urls if u)
+    # If 2+ chunks from the same case are above 0.30, treat as relevant
+    url_counts = {u: urls.count(u) for u in unique_urls}
+    if any(count >= 2 for count in url_counts.values()):
+        return True
 
-    prompt = f"""
-    Query: {query}
-    
-    Search Results:
-    {context_snippet}
-    
-    Does any of the above search results contain information that could help answer the query?
-    Answer 'YES' if there is a potential match or 'NO' if it's completely irrelevant.
-    """
-    
-    try:
-        decision = get_llm_response(prompt).strip().upper()
-        return "YES" in decision
-    except Exception as e:
-        print(f"Error in LLM relevance assessment: {e}") # Changed from logger.error to print
-        # Fallback to score-based heuristic
-        return max_score > 0.35
+    return False
 
 def _filter_diversity(hits: list, max_per_case: int = 2, min_cases: int = 3) -> list:
     """

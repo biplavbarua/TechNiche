@@ -359,15 +359,20 @@ def process_and_store_document(text: str, metadata: dict, doc_id: str = None):
 
 # ─── URL-Based Ingestion ─────────────────────────────────────────────────────
 
-def ingest_case_from_url(url: str, title: str = None) -> bool:
+def ingest_case_from_url(url: str, title: str = None, force: bool = False) -> bool:
     """
     Fetches content from a URL and ingests it into the knowledge base.
-    Now with URL-based deduplication to prevent re-ingesting the same case.
+
+    Args:
+        url:   The IndianKanoon (or other) URL to ingest.
+        title: Optional override for the document title.
+        force: If True, bypass the URL dedup check and re-ingest even if the
+               URL is already in the database (useful for re-indexing).
     """
-    logger.info(f"Ingesting from URL: {url}")
+    logger.info(f"Ingesting from URL: {url} (force={force})")
     
-    # Dedup check: skip if this URL is already in the database
-    if is_url_already_ingested(url):
+    # Dedup check: skip if this URL is already in the database (unless force=True)
+    if not force and is_url_already_ingested(url):
         logger.info(f"URL already ingested, skipping: {url}")
         return False
     
