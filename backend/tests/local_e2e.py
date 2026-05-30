@@ -3,7 +3,7 @@
 Local integration test suite for TechNiche Legal AI backend.
 Tests every changed endpoint against a running local server.
 
-Run: python tests/test_local.py
+Run: python tests/local_e2e.py
 Requires: backend running on http://localhost:8001
 
 Test ordering is intentional:
@@ -223,8 +223,9 @@ total = len(results)
 passed = sum(1 for _, ok in results if ok)
 failed = total - passed
 
-for name, ok in results:
-    print(f"  {'✅' if ok else '❌'} {name}")
+if __name__ == "__main__":
+    for name, ok in results:
+        print(f"  {'✅' if ok else '❌'} {name}")
 
-print(f"\n{'✅ ALL TESTS PASSED' if failed == 0 else f'❌ {failed}/{total} TESTS FAILED'} ({passed}/{total})")
-sys.exit(0 if failed == 0 else 1)
+    print(f"\n{'✅ ALL TESTS PASSED' if failed == 0 else f'❌ {failed}/{total} TESTS FAILED'} ({passed}/{total})")
+    sys.exit(0 if failed == 0 else 1)
