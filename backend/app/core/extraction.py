@@ -13,7 +13,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Configure OpenRouter client
-api_key = os.getenv("OPENROUTER_API_KEY")
+api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
 client = None
 if api_key:
     client = OpenAI(

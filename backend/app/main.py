@@ -175,6 +175,11 @@ def test_ik_api():
         text = fetch_case_text("https://indiankanoon.org/doc/257876/")
         results["fetch_case_text_length"] = len(text)
         results["fetch_case_text_preview"] = text[:500]
+        
+        # Test extraction
+        from app.core.extraction import extract_legal_metadata
+        ai_meta = extract_legal_metadata(text[:25000]) # truncated for speed
+        results["extraction_test"] = ai_meta
     except Exception as e:
         results["fetch_case_text_error"] = str(e)
         results["fetch_case_text_trace"] = traceback.format_exc()
