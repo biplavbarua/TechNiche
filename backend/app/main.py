@@ -309,9 +309,13 @@ def get_cases():
     if search_results and hasattr(search_results, 'matches'):
         for match in search_results.matches:
             meta = match.metadata
+            # Strip leading markdown heading markers (## / ###) from titles
+            # These appear when the first chunk of a doc starts with a heading
+            raw_title = meta.get("title", "Unknown Case")
+            clean_title = raw_title.lstrip("#").strip().split("\n")[0][:120]
             cases.append({
                 "id": match.id,
-                "title": meta.get("title", "Unknown Case"),
+                "title": clean_title,
                 "url": meta.get("url", ""),
                 "score": match.score,
                 "legal_domain": meta.get("ai_legal_domain", ""),
