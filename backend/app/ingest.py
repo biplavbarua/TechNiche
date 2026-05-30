@@ -26,7 +26,7 @@ EMBED_MODEL = "llama-text-embed-v2"
 
 CHUNK_SIZE = 1500      # characters per chunk
 CHUNK_OVERLAP = 200    # overlap between consecutive chunks
-MAX_CHUNKS = 15        # safety cap per document
+MAX_CHUNKS = 20        # safety cap per document (20 × 1500 = 30 000 chars max)
 
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -257,15 +257,24 @@ def process_and_store_document(text: str, metadata: dict, doc_id: str = None):
         # and overruled/upheld relationships before any data enters the DB.
         ai_metadata = extract_legal_metadata(text)
 
-        # FIX 4 — Abort guard: if extraction fails, do NOT store unvalidated data.
-        # Storing chunks with blank metadata silently pollutes the DB with unjoinable
-        # records that can never be correctly cited or temporally resolved.
+        # If LLM extraction fails (e.g. all free-tier models are temporarily down),
+        # fall back to minimal placeholder metadata so we still store the case.
+        # The content is still useful for RAG even without structured metadata.
         if not ai_metadata:
             logger.warning(
                 f"Extraction returned no metadata for '{metadata.get('title', 'Untitled')}'. "
-                f"Aborting ingestion to prevent unvalidated data entering the DB."
+                f"Storing with placeholder metadata (extraction can be re-run later)."
             )
-            return False
+            # Build best-effort metadata from the raw text
+            first_line = text.split('\n')[0].lstrip('#').strip()[:120]
+            ai_metadata = {
+                "case_name": first_line or metadata.get("title", "UNKNOWN"),
+                "judgment_date": "UNKNOWN",
+                "overrules_cases": [],
+                "upholds_cases": [],
+                "legal_domain": "General",
+                "validated_date": None,
+            }
 
         metadata["ai_case_name"] = ai_metadata.get("case_name", "UNKNOWN")
         metadata["ai_judgment_date"] = ai_metadata.get("judgment_date", "UNKNOWN")

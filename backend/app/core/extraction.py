@@ -21,18 +21,17 @@ if api_key:
         api_key=api_key
     )
 
-# Reliable free models for extraction (mirrors rag.py cascade)
+# Reliable free models for extraction.
+# Validated on 2026-05-30 against OpenRouter /api/v1/models — sorted by quality.
 EXTRACTION_MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "minimax/minimax-m2.5:free",
-    "stepfun/step-3.5-flash:free",
-    "arcee-ai/trinity-large-preview:free",
-    "liquid/lfm-2.5-1.2b-thinking:free",
-    "liquid/lfm-2.5-1.2b-instruct:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
-    "arcee-ai/trinity-mini:free",
-    "nvidia/nemotron-nano-12b-v2-vl:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free"
+    "deepseek/deepseek-v4-flash:free",             # ✅ 1M ctx, flagship DeepSeek
+    "meta-llama/llama-3.3-70b-instruct:free",      # ✅ 131K ctx, excellent JSON
+    "google/gemma-4-31b-it:free",                  # ✅ 262K ctx, instruction-tuned
+    "qwen/qwen3-coder:free",                       # ✅ 1M ctx, strong JSON output
+    "nvidia/nemotron-3-super-120b-a12b:free",      # ✅ 1M ctx, large context
+    "liquid/lfm-2.5-1.2b-instruct:free",           # ✅ confirmed working fallback
+    "nvidia/nemotron-nano-12b-v2-vl:free",         # ✅ confirmed working fallback
+    "qwen/qwen3-next-80b-a3b-instruct:free",       # ✅ 262K ctx fallback
 ]
 
 
@@ -40,7 +39,7 @@ class CaseMetadata(BaseModel):
     """Structured legal metadata extracted from court judgments.
     
     This model is the schema-validation layer between raw LLM output
-    and our database. Every field that enters ChromaDB passes through here.
+    and our database. Every field that enters Pinecone passes through here.
     """
     case_name: str = Field(description="The official name of the legal case.")
     judgment_date: str = Field(description="The date of the judgment in YYYY-MM-DD format. If unknown, output 'UNKNOWN'.")
@@ -48,6 +47,25 @@ class CaseMetadata(BaseModel):
     upholds_cases: list[str] = Field(default_factory=list, description="A list of case names that this judgment explicitly upholds. Empty list if none.")
     legal_domain: str = Field(default="General", description="The primary area of Indian law discussed (e.g., Intellectual Property, Corporate, Tax).")
     validated_date: Optional[date] = Field(default=None, description="Parsed date object for temporal comparison. None if date is UNKNOWN or unparseable.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_list_fields(cls, values: dict) -> dict:
+        """Coerce string values to lists for overrules_cases / upholds_cases.
+        
+        Some smaller models return a comma-separated string (e.g. 'Case A, Case B')
+        instead of a JSON array. This validator normalises that before Pydantic
+        validates the types, preventing spurious ValidationErrors that would
+        cause the entire cascade to fall through to the next model.
+        """
+        for field in ("overrules_cases", "upholds_cases"):
+            val = values.get(field)
+            if isinstance(val, str):
+                # Empty string → empty list; otherwise split on comma
+                values[field] = [v.strip() for v in val.split(",") if v.strip()] if val.strip() else []
+            elif val is None:
+                values[field] = []
+        return values
 
     @model_validator(mode="after")
     def compute_validated_date(self) -> "CaseMetadata":

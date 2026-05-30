@@ -31,7 +31,8 @@ export function LearningModal({ isOpen, onClose }: LearningModalProps) {
 
             const result = await learnFromUrl(url);
             setStatus("success");
-            setMessage(result.message || "Successfully ingested into the knowledge base.");
+            // "already ingested" is a success — it's in the KB
+            setMessage(result.message || "Successfully added to the knowledge base.");
             setUrl("");
             setTimeout(() => {
                 setStatus("idle");

@@ -45,10 +45,11 @@ except Exception as e:
 # ─── LLM Models (Free models fallback cascade) ───────────────────────────────
 
 MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "mistralai/mistral-nemo:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "liquid/lfm-2.5-1.2b-instruct:free"
+    "deepseek/deepseek-v4-flash:free",        # flagship — 1M ctx, best reasoning
+    "meta-llama/llama-3.3-70b-instruct:free", # 131K ctx, excellent instruction following
+    "google/gemma-4-31b-it:free",             # 262K ctx, strong legal reasoning
+    "nvidia/nemotron-3-super-120b-a12b:free", # 1M ctx, large model
+    "liquid/lfm-2.5-1.2b-instruct:free",      # confirmed working fallback
 ]
 
 

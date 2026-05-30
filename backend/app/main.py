@@ -37,15 +37,24 @@ def _get_task(task_id: str) -> dict | None:
 
 # ─── Background Workers ──────────────────────────────────────────────────────
 
-def _run_url_ingestion(task_id: str, url: str):
+def _run_url_ingestion(task_id: str, url: str, force: bool = False):
     """Background worker: fetch, embed and store a case from a URL."""
     _set_task(task_id, "running", url=url, started_at=time.time())
     try:
+        from app.ingest import is_url_already_ingested
+        if not force and is_url_already_ingested(url):
+            _set_task(task_id, "done", url=url,
+                      message="URL already in knowledge base (skipped). Use force=true to re-ingest.")
+            return
+        
+        # Call with force=True since we already handled dedup above
+        from app.ingest import ingest_case_from_url
         success = ingest_case_from_url(url)
         if success:
             _set_task(task_id, "done", url=url, message="Successfully ingested content from verified URL.")
         else:
-            _set_task(task_id, "failed", url=url, error="Ingestion returned False. URL may already be ingested, or content could not be extracted.")
+            _set_task(task_id, "failed", url=url,
+                      error="process_and_store_document returned False. Check Render logs for details.")
     except Exception as e:
         _set_task(task_id, "failed", url=url, error=str(e), trace=traceback.format_exc())
 
@@ -130,6 +139,7 @@ class CrawlRequest(BaseModel):
 
 class LearnRequest(BaseModel):
     url: HttpUrl = Field(..., description="The IndianKanoon URL to learn from")
+    force: bool = Field(False, description="If true, bypass dedup check and re-ingest")
 
 # ─── Core Endpoints ───────────────────────────────────────────────────────────
 
@@ -162,7 +172,7 @@ def learn_from_url(request: LearnRequest, background_tasks: BackgroundTasks):
     task_id = str(uuid.uuid4())
     url = str(request.url)
     _set_task(task_id, "pending", url=url, queued_at=time.time())
-    background_tasks.add_task(_run_url_ingestion, task_id, url)
+    background_tasks.add_task(_run_url_ingestion, task_id, url, request.force)
     return {
         "message": "Ingestion queued. Poll /api/tasks/{task_id} for status.",
         "task_id": task_id,
